@@ -1,0 +1,48 @@
+// A small site: typed components, a prefab, a relationship, ordered children, merge rules.
+using flecs.meta
+
+struct Vec2(x: f32, y: f32)
+enum Status(Draft, Review, Done)
+bitmask Flags(Pinned, Hidden)
+
+// A member's rule overrides its component's.
+struct Title(text: string)
+Title {
+  text { (Merge, Text) }
+}
+
+vector Labels(type: string)
+
+struct Card(pos: Vec2, views: u64, labels: Labels, corners: {i32, count: 2}, flags: Flags)
+// Instances share the prefab's Card instead of copying it.
+Card {
+  (OnInstantiate, Inherit)
+  (Merge, LastWriter)
+  views { (Merge, Counter) }
+}
+
+Author {}
+
+people {
+  alice {}
+  bob {}
+}
+
+prefab Page {
+  Status: {Draft}
+  Card: {pos: {x: 1.5, y: -2}, views: 18446744073709551615, labels: ["page"], corners: [-1, 1], flags: Pinned}
+}
+
+site {
+  OrderedChildren
+  zeta : Page {
+    Title: {text: "Zeta first"}
+    (Author, people.bob)
+  }
+  alpha : Page {
+    Title: {text: "Alpha second"}
+    Status: {Review}
+    (Author, people.alice)
+    notes {}
+  }
+}

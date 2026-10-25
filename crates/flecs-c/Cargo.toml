@@ -1,0 +1,11 @@
+[package]
+name = "flecs-c"
+description = "Flecs's amalgamated C (vendor/flecs submodule) built with cc for the host and for wasm32-unknown-unknown, plus the declarations Rust calls it through."
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+links = "flecs"
+
+[build-dependencies]
+cc = "1"

@@ -1,0 +1,489 @@
+//! Flecs's C (built by build.rs) and the few declarations Rust calls it through.
+//!
+//! On wasm32-unknown-unknown there is no C library, so this crate also provides the parts of one that are not in
+//! wasm-libc/: malloc, calloc, realloc and free on Rust's allocator (with a 16-byte header holding the size, adapted
+//! from den's vendor/hyperion-flecs-c), abort and exit as traps, and strtod/strtof/atof on Rust's float parser, which
+//! rounds exactly as a native libc does. Natively the C library provides all of them.
+//!
+//! The structs below mirror Flecs's own (`flecs.h`); `tests` compares their sizes, alignments and the member offsets
+//! Rust reads with what the C compiler saw, on every target.
+#![no_std]
+#![allow(
+    non_camel_case_types,
+    non_snake_case,
+    non_upper_case_globals,
+    clippy::missing_safety_doc
+)]
+
+#[cfg(target_arch = "wasm32")]
+extern crate alloc;
+
+use core::ffi::{c_char, c_int, c_void};
+
+pub type ecs_entity_t = u64;
+pub type ecs_id_t = u64;
+
+#[repr(C)]
+pub struct ecs_world_t {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct ecs_type_t {
+    pub array: *mut ecs_id_t,
+    pub count: i32,
+}
+
+pub const EcsPrimitiveType: i32 = 0;
+pub const EcsBitmaskType: i32 = 1;
+pub const EcsEnumType: i32 = 2;
+pub const EcsStructType: i32 = 3;
+pub const EcsArrayType: i32 = 4;
+pub const EcsVectorType: i32 = 5;
+pub const EcsOpaqueType: i32 = 6;
+pub const EcsMapType: i32 = 7;
+pub const EcsValueType: i32 = 8;
+
+#[repr(C)]
+pub struct EcsType {
+    pub kind: i32,
+    pub existing: bool,
+    pub partial: bool,
+}
+
+pub const EcsBool: i32 = 1;
+pub const EcsChar: i32 = 2;
+pub const EcsByte: i32 = 3;
+pub const EcsU8: i32 = 4;
+pub const EcsU16: i32 = 5;
+pub const EcsU32: i32 = 6;
+pub const EcsU64: i32 = 7;
+pub const EcsI8: i32 = 8;
+pub const EcsI16: i32 = 9;
+pub const EcsI32: i32 = 10;
+pub const EcsI64: i32 = 11;
+pub const EcsF32: i32 = 12;
+pub const EcsF64: i32 = 13;
+pub const EcsUPtr: i32 = 14;
+pub const EcsIPtr: i32 = 15;
+pub const EcsString: i32 = 16;
+pub const EcsEntity: i32 = 17;
+pub const EcsId: i32 = 18;
+
+#[repr(C)]
+pub struct EcsPrimitive {
+    pub kind: i32,
+}
+
+#[repr(C)]
+pub struct ecs_vec_t {
+    pub array: *mut c_void,
+    pub count: i32,
+    pub size: i32,
+}
+
+#[repr(C)]
+pub struct EcsStruct {
+    pub members: ecs_vec_t,
+}
+
+#[repr(C)]
+pub struct ecs_member_value_range_t {
+    pub min: f64,
+    pub max: f64,
+}
+
+#[repr(C)]
+pub struct ecs_member_t {
+    pub name: *const c_char,
+    pub type_: ecs_entity_t,
+    pub count: i32,
+    pub offset: i32,
+    pub unit: ecs_entity_t,
+    pub use_offset: bool,
+    pub range: ecs_member_value_range_t,
+    pub error_range: ecs_member_value_range_t,
+    pub warning_range: ecs_member_value_range_t,
+    pub size: i32,
+    pub member: ecs_entity_t,
+}
+
+#[repr(C)]
+pub struct EcsEnum {
+    pub underlying_type: ecs_entity_t,
+}
+
+#[repr(C)]
+pub struct ecs_enum_constant_t {
+    pub name: *const c_char,
+    pub value: i64,
+    pub value_unsigned: u64,
+    pub constant: ecs_entity_t,
+}
+
+#[repr(C)]
+pub struct ecs_bitmask_constant_t {
+    pub name: *const c_char,
+    pub value: u64,
+    pub _unused: i64,
+    pub constant: ecs_entity_t,
+}
+
+#[repr(C)]
+pub struct EcsConstants {
+    pub constants: *mut c_void,
+    pub ordered_constants: ecs_vec_t,
+}
+
+#[repr(C)]
+pub struct EcsArray {
+    pub type_: ecs_entity_t,
+    pub count: i32,
+}
+
+#[repr(C)]
+pub struct EcsVector {
+    pub type_: ecs_entity_t,
+}
+
+#[repr(C)]
+pub struct EcsComponent {
+    pub size: i32,
+    pub alignment: i32,
+}
+
+pub const ECS_PAIR: u64 = 1u64 << 63;
+pub const ECS_ID_FLAGS_MASK: u64 = 0xFFu64 << 60;
+pub const ECS_COMPONENT_MASK: u64 = !ECS_ID_FLAGS_MASK;
+
+pub type glue_log_t =
+    unsafe extern "C" fn(level: i32, file: *const c_char, line: i32, msg: *const c_char);
+
+unsafe extern "C" {
+    pub fn glue_os_api(log: glue_log_t, abort: unsafe extern "C" fn());
+    pub fn glue_children(
+        world: *const ecs_world_t,
+        parent: ecs_entity_t,
+        out: *mut ecs_entity_t,
+        cap: i32,
+    ) -> i32;
+    pub fn glue_roots(world: *mut ecs_world_t, out: *mut ecs_entity_t, cap: i32) -> i32;
+    pub fn glue_layout(which: i32, align: i32) -> usize;
+    pub fn glue_member_offset(which: i32) -> usize;
+
+    pub fn ecs_init() -> *mut ecs_world_t;
+    pub fn ecs_fini(world: *mut ecs_world_t) -> c_int;
+    pub fn ecs_script_run(
+        world: *mut ecs_world_t,
+        name: *const c_char,
+        code: *const c_char,
+        result: *mut c_void,
+    ) -> c_int;
+    pub fn ecs_lookup(world: *const ecs_world_t, path: *const c_char) -> ecs_entity_t;
+    pub fn ecs_get_name(world: *const ecs_world_t, entity: ecs_entity_t) -> *const c_char;
+    pub fn ecs_get_parent(world: *const ecs_world_t, entity: ecs_entity_t) -> ecs_entity_t;
+    pub fn ecs_get_type(world: *const ecs_world_t, entity: ecs_entity_t) -> *const ecs_type_t;
+    pub fn ecs_has_id(world: *const ecs_world_t, entity: ecs_entity_t, id: ecs_id_t) -> bool;
+    pub fn ecs_owns_id(world: *const ecs_world_t, entity: ecs_entity_t, id: ecs_id_t) -> bool;
+    pub fn ecs_get_id(
+        world: *const ecs_world_t,
+        entity: ecs_entity_t,
+        id: ecs_id_t,
+    ) -> *const c_void;
+    pub fn ecs_get_typeid(world: *const ecs_world_t, id: ecs_id_t) -> ecs_entity_t;
+    pub fn ecs_get_alive(world: *const ecs_world_t, entity: ecs_entity_t) -> ecs_entity_t;
+    pub fn ecs_set_id(
+        world: *mut ecs_world_t,
+        entity: ecs_entity_t,
+        id: ecs_id_t,
+        size: usize,
+        ptr: *const c_void,
+    );
+    pub fn ecs_get_target(
+        world: *const ecs_world_t,
+        entity: ecs_entity_t,
+        rel: ecs_entity_t,
+        index: i32,
+    ) -> ecs_entity_t;
+    pub fn ecs_set_lookup_path(
+        world: *mut ecs_world_t,
+        path: *const ecs_entity_t,
+    ) -> *mut ecs_entity_t;
+    pub fn ecs_is_alive(world: *const ecs_world_t, entity: ecs_entity_t) -> bool;
+
+    pub static EcsFlecsCore: ecs_entity_t;
+    pub static EcsChildOf: ecs_entity_t;
+    pub static EcsIsA: ecs_entity_t;
+    pub static EcsPrefab: ecs_entity_t;
+    pub static EcsOrderedChildren: ecs_entity_t;
+    pub static EcsOnInstantiate: ecs_entity_t;
+    pub static EcsDontInherit: ecs_entity_t;
+    pub static EcsExclusive: ecs_entity_t;
+    pub static EcsParentDepth: ecs_entity_t;
+    pub static FLECS_IDEcsIdentifierID_: ecs_entity_t;
+    pub static FLECS_IDEcsParentID_: ecs_entity_t;
+    pub static FLECS_IDEcsComponentID_: ecs_entity_t;
+    pub static FLECS_IDEcsTypeID_: ecs_entity_t;
+    pub static FLECS_IDEcsPrimitiveID_: ecs_entity_t;
+    pub static FLECS_IDEcsStructID_: ecs_entity_t;
+    pub static FLECS_IDEcsEnumID_: ecs_entity_t;
+    pub static FLECS_IDEcsBitmaskID_: ecs_entity_t;
+    pub static FLECS_IDEcsConstantsID_: ecs_entity_t;
+    pub static FLECS_IDEcsArrayID_: ecs_entity_t;
+    pub static FLECS_IDEcsVectorID_: ecs_entity_t;
+}
+
+/// `ecs_pair(rel, tgt)`.
+pub fn pair(rel: ecs_entity_t, tgt: ecs_entity_t) -> ecs_id_t {
+    ECS_PAIR | ((rel & 0xFFFF_FFFF) << 32) | (tgt & 0xFFFF_FFFF)
+}
+
+pub fn is_pair(id: ecs_id_t) -> bool {
+    id & ECS_ID_FLAGS_MASK == ECS_PAIR
+}
+
+/// The low 32 bits of each half of a pair (alive lookup gives the full entity).
+pub fn pair_first(id: ecs_id_t) -> ecs_entity_t {
+    (id & ECS_COMPONENT_MASK) >> 32
+}
+
+pub fn pair_second(id: ecs_id_t) -> ecs_entity_t {
+    id & 0xFFFF_FFFF
+}
+
+#[cfg(target_arch = "wasm32")]
+mod wasm_libc {
+    use alloc::alloc::{Layout, alloc, alloc_zeroed, dealloc, realloc as rs_realloc};
+    use core::ffi::{c_char, c_void};
+
+    const HEADER: usize = 16;
+
+    fn layout(n: usize) -> Option<Layout> {
+        Layout::from_size_align(n.checked_add(HEADER)?, HEADER).ok()
+    }
+
+    unsafe fn finish(base: *mut u8, n: usize) -> *mut c_void {
+        if base.is_null() {
+            return core::ptr::null_mut();
+        }
+        // SAFETY: `base` is a fresh block of at least HEADER bytes, 16-aligned.
+        unsafe {
+            base.cast::<usize>().write(n);
+            base.add(HEADER).cast()
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn malloc(n: usize) -> *mut c_void {
+        let Some(l) = layout(n) else {
+            return core::ptr::null_mut();
+        };
+        // SAFETY: the layout is non-zero sized (HEADER bytes at least).
+        unsafe { finish(alloc(l), n) }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut c_void {
+        let Some(n) = count.checked_mul(size) else {
+            return core::ptr::null_mut();
+        };
+        let Some(l) = layout(n) else {
+            return core::ptr::null_mut();
+        };
+        // SAFETY: as above.
+        unsafe { finish(alloc_zeroed(l), n) }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn free(p: *mut c_void) {
+        if p.is_null() {
+            return;
+        }
+        // SAFETY: `p` came from this allocator, so the header sits HEADER bytes before it and holds the size.
+        unsafe {
+            let base = p.cast::<u8>().sub(HEADER);
+            let n = base.cast::<usize>().read();
+            dealloc(base, Layout::from_size_align_unchecked(n + HEADER, HEADER));
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn realloc(p: *mut c_void, n: usize) -> *mut c_void {
+        if p.is_null() {
+            // SAFETY: plain allocation.
+            return unsafe { malloc(n) };
+        }
+        if layout(n).is_none() {
+            return core::ptr::null_mut();
+        }
+        // SAFETY: `p` came from this allocator (see free); the new size fits a Layout (checked above).
+        unsafe {
+            let base = p.cast::<u8>().sub(HEADER);
+            let old = base.cast::<usize>().read();
+            let grown = rs_realloc(
+                base,
+                Layout::from_size_align_unchecked(old + HEADER, HEADER),
+                n + HEADER,
+            );
+            finish(grown, n)
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn abort() -> ! {
+        core::arch::wasm32::unreachable()
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn exit(_code: i32) -> ! {
+        core::arch::wasm32::unreachable()
+    }
+
+    /// The length of the longest prefix of `s` that strtod accepts as a decimal number (sign, digits, optional
+    /// fraction, optional exponent), or as inf/infinity/nan; 0 if none. Hex floats are not accepted (Flecs passes
+    /// only decimal literals).
+    fn float_prefix(s: &[u8]) -> usize {
+        let mut i = 0;
+        if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
+            i += 1;
+        }
+        let word = |w: &[u8], at: usize| {
+            s.len() >= at + w.len() && s[at..at + w.len()].eq_ignore_ascii_case(w)
+        };
+        if word(b"infinity", i) {
+            return i + 8;
+        }
+        if word(b"inf", i) || word(b"nan", i) {
+            return i + 3;
+        }
+        let digits = |mut j: usize| {
+            while j < s.len() && s[j].is_ascii_digit() {
+                j += 1;
+            }
+            j
+        };
+        let int_end = digits(i);
+        let mut end = int_end;
+        let mut any = int_end > i;
+        if end < s.len() && s[end] == b'.' {
+            let frac_end = digits(end + 1);
+            any |= frac_end > end + 1;
+            end = frac_end;
+        }
+        if !any {
+            return 0;
+        }
+        if end < s.len() && (s[end] == b'e' || s[end] == b'E') {
+            let mut j = end + 1;
+            if j < s.len() && (s[j] == b'+' || s[j] == b'-') {
+                j += 1;
+            }
+            let exp_end = digits(j);
+            if exp_end > j {
+                end = exp_end;
+            }
+        }
+        end
+    }
+
+    /// Skips leading whitespace, finds the number and parses it with `parse`; sets `*end` like strtod.
+    unsafe fn parse_c<T: Default>(
+        s: *const c_char,
+        end: *mut *mut c_char,
+        parse: fn(&str) -> Option<T>,
+    ) -> T {
+        // SAFETY: `s` is a NUL-terminated C string (strtod's contract).
+        let bytes = unsafe { core::ffi::CStr::from_ptr(s) }.to_bytes();
+        let ws = bytes
+            .iter()
+            .take_while(|c| matches!(c, b' ' | b'\t'..=b'\r'))
+            .count();
+        let n = float_prefix(&bytes[ws..]);
+        let text = core::str::from_utf8(&bytes[ws..ws + n]).unwrap_or("");
+        let value = if n == 0 { None } else { parse(text) };
+        if !end.is_null() {
+            let used = if value.is_some() { ws + n } else { 0 };
+            // SAFETY: `end` is a valid out pointer; `used` is within the string.
+            unsafe { *end = s.add(used).cast_mut() };
+        }
+        value.unwrap_or_default()
+    }
+
+    fn parse_f64(t: &str) -> Option<f64> {
+        t.parse::<f64>().ok()
+    }
+
+    fn parse_f32(t: &str) -> Option<f32> {
+        t.parse::<f32>().ok()
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn strtod(s: *const c_char, end: *mut *mut c_char) -> f64 {
+        // SAFETY: strtod's contract.
+        unsafe { parse_c(s, end, parse_f64) }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn strtof(s: *const c_char, end: *mut *mut c_char) -> f32 {
+        // SAFETY: strtof's contract.
+        unsafe { parse_c(s, end, parse_f32) }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn atof(s: *const c_char) -> f64 {
+        // SAFETY: atof's contract.
+        unsafe { parse_c(s, core::ptr::null_mut(), parse_f64) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use super::*;
+    use core::mem::{align_of, offset_of, size_of};
+
+    #[test]
+    fn layouts_match_c() {
+        let rust = [
+            (size_of::<ecs_type_t>(), align_of::<ecs_type_t>()),
+            (size_of::<EcsType>(), align_of::<EcsType>()),
+            (size_of::<EcsPrimitive>(), align_of::<EcsPrimitive>()),
+            (size_of::<ecs_vec_t>(), align_of::<ecs_vec_t>()),
+            (size_of::<EcsStruct>(), align_of::<EcsStruct>()),
+            (size_of::<ecs_member_t>(), align_of::<ecs_member_t>()),
+            (size_of::<EcsEnum>(), align_of::<EcsEnum>()),
+            (
+                size_of::<ecs_enum_constant_t>(),
+                align_of::<ecs_enum_constant_t>(),
+            ),
+            (
+                size_of::<ecs_bitmask_constant_t>(),
+                align_of::<ecs_bitmask_constant_t>(),
+            ),
+            (size_of::<EcsConstants>(), align_of::<EcsConstants>()),
+            (size_of::<EcsArray>(), align_of::<EcsArray>()),
+            (size_of::<EcsVector>(), align_of::<EcsVector>()),
+            (size_of::<EcsComponent>(), align_of::<EcsComponent>()),
+        ];
+        for (i, (size, align)) in rust.iter().enumerate() {
+            // SAFETY: plain queries.
+            let (c_size, c_align) = unsafe { (glue_layout(i as i32, 0), glue_layout(i as i32, 1)) };
+            assert_eq!((*size, *align), (c_size, c_align), "struct {i}");
+        }
+        let offsets = [
+            offset_of!(ecs_member_t, name),
+            offset_of!(ecs_member_t, type_),
+            offset_of!(ecs_member_t, count),
+            offset_of!(ecs_member_t, offset),
+            offset_of!(ecs_member_t, size),
+        ];
+        for (i, off) in offsets.iter().enumerate() {
+            // SAFETY: plain query.
+            assert_eq!(
+                *off,
+                unsafe { glue_member_offset(i as i32) },
+                "ecs_member_t field {i}"
+            );
+        }
+    }
+}

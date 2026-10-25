@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    env:
+      # Ubuntu's clang has the WebAssembly backend; wasm32 needs an unwrapped clang and llvm-ar.
+      CC_wasm32_unknown_unknown: clang-18
+      AR_wasm32_unknown_unknown: llvm-ar-18
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.2
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: 0.13.4
+      - name: Build and test
+        run: uv run build.py --test
+      - name: Lint
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy -p flecs-snapshot --target wasm32-unknown-unknown -- -D warnings
+          uv run ruff check
+          uv run ruff format --check
+          uv run pyright
+      - name: Wasm imports nothing
+        run: |
+          python3 - <<'PY'
+          import sys
+          data = open("dist/flecs.wasm", "rb").read()
+          i = 8
+          def leb(i):
+              n = s = 0
+              while True:
+                  b = data[i]; i += 1; n |= (b & 0x7F) << s; s += 7
+                  if b < 0x80: return n, i
+          while i < len(data):
+              sid = data[i]; size, i = leb(i + 1)
+              if sid == 2:
+                  count, _ = leb(i)
+                  if count: sys.exit(f"flecs.wasm has {count} imports")
+              i += size
+          print(f"flecs.wasm: {len(data)} bytes, no imports")
+          PY

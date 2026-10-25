@@ -1,0 +1,26 @@
+{
+  "name": "@indexable/flecs-opinionated",
+  "version": "0.1.0",
+  "description": "Run Flecs scripts in WebAssembly and read the world back as deterministic DAG-CBOR: one document, or a Merkle DAG of entity blocks.",
+  "license": "MIT",
+  "type": "module",
+  "repository": { "type": "git", "url": "git+https://github.com/indexable-inc/flecs-opinionated.git" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./flecs.wasm": "./dist/flecs.wasm"
+  },
+  "files": ["dist", "SPEC.md"],
+  "sideEffects": false,
+  "scripts": {
+    "build": "uv run build.py",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@ipld/dag-cbor": "10.0.2",
+    "multiformats": "14.0.5"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.4",
+    "typescript": "7.0.2"
+  }
+}

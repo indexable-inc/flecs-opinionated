@@ -1,0 +1,17 @@
+[package]
+name = "flecs-snapshot"
+description = "Run Flecs scripts in a world and read it back as DAG-CBOR: one document, or a Merkle DAG of entity blocks with one root CID. Native (rlib, cdylib, staticlib) and wasm32-unknown-unknown from the same code."
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+flecs-c = { path = "../flecs-c" }
+cid = "0.11"
+ipld-core = "0.4"
+serde_ipld_dagcbor = "0.7"
+sha2 = "0.10"

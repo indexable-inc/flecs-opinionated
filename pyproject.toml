@@ -1,0 +1,28 @@
+[project]
+name = "build-tools"
+version = "0.1.0"
+description = "Build script for the Rust crates, the wasm module and the TS package."
+requires-python = ">=3.13"
+dependencies = []
+
+[dependency-groups]
+dev = ["ruff>=0.14", "pyright>=1.1.407"]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = []
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+extend-exclude = ["vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.pyright]
+include = ["build.py"]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
