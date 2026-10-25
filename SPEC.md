@@ -12,7 +12,8 @@ canonical form of RFC 8949 §4.2.1 plus IPLD's stricter rules:
 - map keys are strings, sorted by length first and then bytewise;
 - integers use the shortest form;
 - floats are always 64-bit; NaN and the infinities are not allowed, so writing one is an error that names the
-  component;
+  component and member. `-0.0` is kept as written (DAG-CBOR allows it, and it is a different float from `0.0`), so
+  `-0.0` and `0.0` give different bytes;
 - the only tag is 42 (a CID link);
 - no indefinite lengths.
 
@@ -20,31 +21,54 @@ The same scripts produce the same bytes on every host. Native and wasm builds co
 `-ffp-contract=off`, so arithmetic in script expressions rounds the same way. In wasm, strtod is Rust's correctly
 rounded parser. A test compares native and wasm output byte for byte.
 
-A block's CID is CIDv1, codec dag-cbor (0x71), multihash sha2-256 (0x12).
+A block's CID is CIDv1 with multihash sha2-256 (0x12). Entity, root and blob chunk-list blocks use codec dag-cbor
+(0x71); blob chunks are raw (0x55).
+
+Integer literals in scripts that do not fit 64 bits are an error on every host: the wasm libc's `strtoull` and
+`strtoll` saturate and set `ERANGE`, as native libc does, so Flecs refuses the same literals natively and in wasm.
 
 ## Values
 
 | Flecs type | Value |
 |---|---|
 | bool | bool |
-| char, u8 to u64, i8 to i64, uptr, iptr, byte | integer |
+| char, u8 to u64, i8 to i64, byte | integer |
+| uptr, iptr | refused: their width is the host's pointer width, which differs between native and wasm |
+| `sync.Bytes` (a `vector<u8>`) | a byte string, inline (CBOR major type 2) |
+| `sync.Blob` (a `vector<u8>`) | a link (tag 42) to the blob's blocks; see "Blobs" |
 | f32, f64 | float (an f32 is widened to f64 exactly) |
 | string | text, or null for a null pointer; it must be UTF-8 |
 | entity | a ref, or null for 0 |
 | id | a ref, `[ref, ref]` for a pair, or null |
-| enum | the constant's name; a value that is not a constant is an error |
+| enum | the constant's name; a value that is not a constant is an error. A constant's value is Flecs's `value_unsigned` when the underlying type is unsigned and `value` otherwise |
 | bitmask | an array of constant names; leftover bits are an error |
 | struct | a map from member name to value |
 | array, or an inline member array (`count > 1`) | an array |
 | vector | an array |
 | opaque, map, anything else | an error that names the type |
+| a component marked `DontFragment` | an error: its values live outside the entity's type, where the walk does not read them yet |
+
+Errors name the component and the member path inside it, such as `component Card: member pos.x: ...` or
+`member pts[2].x`.
+
+Binary data uses the two `vector<u8>` types the `sync` module defines, so the choice is in the type, and so in the
+layout (`"bytes"` or `"blob"`): `struct File(name: string, thumb: sync.Bytes, body: sync.Blob)`. Use Bytes for small
+values that change together with the rest of the record, and Blob for large ones, so an unchanged body is never
+re-hashed into a new entity block and unchanged chunks are shared between versions. Only `LastWriter` and `KeepBoth`
+apply to them.
 
 A **ref** is `{"id": bytes16}` for an entity with a stable id, or `{"path": text}` for one without (Flecs's
 builtins, such as `flecs.core.Prefab`). Snapshots never contain Flecs entity ids.
 
-Paths are Flecs paths. Each segment is the entity's name with `\` and `.` escaped by `\`. An unnamed child is
-`#n`, where n counts the parent's unnamed children in Flecs id order. That ordering is local to one world, so
-unnamed entities are not history-independent; name anything that will be compared across worlds.
+Paths are Flecs paths. Each segment is the entity's name with `\` and `.` escaped by `\`, and a leading `#` escaped
+the same way, so a child named `#0` (possible through the C API; a script reads `"#0"` as an id) is `\#0` and never
+collides with an unnamed child. An unnamed child is `#n`, where n counts the parent's unnamed children in Flecs id
+order. That ordering is local to one world, so unnamed entities are not history-independent; name anything that will
+be compared across worlds.
+
+The library resolves the paths it is given (roots, `World::set`, `{"path"}` refs) the same way it writes them:
+segment by segment against the segments above. It never searches parent scopes or Flecs's lookup path, as
+`ecs_lookup` does.
 
 ## Stable ids
 
@@ -57,6 +81,11 @@ renaming or moving an entity keeps its id. Two peers that run the same script un
 the same ids, which is what lets them merge the entity instead of duplicating it. `sync.Id` has
 `(OnInstantiate, DontInherit)`: a prefab instance gets its own id from its own path rather than the prefab's.
 
+A script that fails part way still has made the entities before the error, and they get ids too, so no user entity
+is ever left without one. Two entities with the same id (a script that copies `sync.Id`, or a second script under
+the same name making an entity at a path an earlier one had) are an error, both when ids are assigned and in every
+snapshot that holds both.
+
 Pair targets, entity-typed fields and `isa` lists refer to entities by this id.
 
 Not built yet: entities created at runtime by an actor rather than by a script. They will use
@@ -67,22 +96,27 @@ tick.
 
 Each component and pair type a snapshot uses gets one layout record, keyed by the type's path:
 
-    {"layout": L, "merge": rule | null, "writable_by": ref | null, "validated_by": ref | null, "hash": bytes8}
+    {"layout": L, "merge": rule | null, "sync": mode, "writable_by": ref | null, "validated_by": ref | null,
+     "hash": bytes8}
 
 `hash` is the first 8 bytes of SHA-256 over the DAG-CBOR of the record without `hash`. Every component value carries
 the hash of its type's record, so a value can never be read with the wrong layout.
 
 `L` is one of:
 
-- a primitive name: `"bool"`, `"u8"` … `"f64"`, `"string"`, `"entity"`, `"id"` and so on;
+- a primitive name: `"bool"`, `"u8"` … `"f64"`, `"string"`, `"entity"`, `"id"`, `"bytes"`, `"blob"` and so on
+  (`"uptr"` and `"iptr"` are refused);
 - `{"struct": path | null, "members": [[name, L, rule | null], ...]}`;
 - `{"enum": path | null, "underlying": L, "constants": [[name, int], ...]}`;
 - `{"bitmask": path | null, "constants": [[name, uint], ...]}`;
 - `{"array": L, "count": n}`;
 - `{"vector": L}`.
 
-Constants and members are listed in declaration order. Renaming a member, reordering members, changing a type or
-changing a rule all change the hash.
+Constants and members are listed in declaration order. Renaming a member, reordering members, changing a type,
+changing a rule or changing the sync mode all change the hash.
+
+`merge` is the whole value's rule for a non-struct type and null for a struct. A member's rule slot follows "Rules"
+below: inside a value one rule merges whole, every rule slot is null. A reader refuses a record that breaks this.
 
 ## Entity record
 
@@ -92,23 +126,34 @@ changing a rule all change the hash.
      "isa": [ref],
      "inherited": {"tags": [ref], "components": [path], "pairs": [[rel, tgt]]}}
 
-- **tags and pairs** are sorted by their DAG-CBOR encoding. The record leaves out the name, the parent, `IsA`, the
-  stable id and ids that carry flags.
+- **tags and pairs** are sorted by their DAG-CBOR encoding. Flecs keeps no declaration order for them (an entity's
+  type is sorted by id, and ids follow creation order), so there is no declared order to keep; when order matters,
+  model it as data (a vector component, or children under `OrderedChildren`). The record leaves out the name, the
+  parent, `IsA`, the stable id and ids that carry flags.
 - **Builtin components** (anything under `flecs`) are written as tags with no value. Their layouts depend on the
   pointer size, so leaving the values out keeps wasm32 and 64-bit output identical.
-- **`isa`** lists every prefab the entity is an instance of, nearest first. Prefabs at the same depth are in path
-  order.
-- **Inherited parts** are the tags, components and pairs reached through `isa` and not owned by the entity. A
-  component with Flecs's default `(OnInstantiate, Override)` is copied into the instance, so it counts as owned. Only
-  `(OnInstantiate, Inherit)` components show up under `inherited`.
-- **Skipped parts**: `Prefab`, anything with `DontInherit`, and a second target of an exclusive relationship.
+- **`isa`** lists every prefab the entity is an instance of, a whole depth at a time, nearest first. Each depth is
+  sorted by path: `e : A, B`, `A : Z`, `B : Y` gives `[A, B, Y, Z]`.
+- **Inherited parts** are the tags, components and pairs whose type (or relationship) has `(OnInstantiate, Inherit)`
+  and that the entity has through `isa` but does not own: exactly what Flecs's `ecs_get` and `ecs_has` find through
+  IsA. A part with the default `(OnInstantiate, Override)` is copied into the instance, so it is owned; one with
+  `DontInherit` is not reachable at all. When two bases give the same part, the first in `isa` order wins. Flecs
+  instead searches depth first in the order of the bases' entity ids, which is not stable across worlds, so the two
+  differ only for a part given by two bases at once; give it to one base, or own it on the instance.
+- **Skipped parts**: `Prefab`, anything without `(OnInstantiate, Inherit)` on a base, and a second target of an
+  exclusive relationship.
 
 ## Document
 
     {"version": 1, "layouts": {path: record}, "entities": [record + {"path": text, "parent": index | null}]}
 
 Entities are in depth-first order from each root in the order the caller listed them. Children come in declared
-order when the parent has `OrderedChildren`, and otherwise sorted by segment.
+order when the parent has `OrderedChildren`, and otherwise sorted by segment (bytewise). Flecs's own child order
+without `OrderedChildren` is table and id order, which depends on the order entities were created and is not the
+same across worlds, so it is not used. `World::roots()` lists the named roots (without `flecs` and `sync`), also
+sorted bytewise.
+
+Ephemeral parts (see "Sync modes") and their layouts are never in a document.
 
 ## Blocks
 
@@ -118,7 +163,29 @@ tree is the Merkle tree. The world root block is:
     {"version": 1, "layouts": {path: record}, "roots": [[path, CID], ...]}
 
 The library writes a block set as a CARv1 file: the header `{"roots": [root CID], "version": 1}`, then the root block,
-then the entity blocks depth first, each written once.
+then the entity blocks depth first, then the blob blocks in the order the walk reached them, each written once.
+
+### Blobs
+
+A `sync.Blob` value is cut with FastCDC 2020 (the `fastcdc` crate 5.0.0, pinned exactly, normalization level 1, seed
+0) with a minimum of 16 KiB, an average of 64 KiB and a maximum of 256 KiB per chunk. Each chunk is a raw block. The
+field holds:
+
+- the raw chunk's link, when the blob is one chunk (including the empty blob);
+- otherwise the link of a dag-cbor chunk list `[[length, raw link], ...]` in order.
+
+This is the IPLD Flexible Byte Layout restricted to one level. Because chunk boundaries depend on the content, an
+edit changes only the chunks around it, and every other chunk keeps its CID and is shared between versions. A blob of
+more than 16384 chunks (about 1 GiB) is refused for now. A different chunker or different sizes would change every
+blob CID, so they are part of this version.
+
+Readers fetch blobs lazily: the entity block holds only the link, and `read_blob` (Rust) or `readBlob` (TS) fetches
+and checks the chunks when asked. `diff` never reads blob blocks; a changed blob shows as a changed entity.
+
+`World::set` takes a Blob field's bytes and does the chunking. A Blob cannot be Ephemeral, because it needs stored
+blocks; use Bytes there.
+
+### Diff
 
 `diff(a, b, getBlock)` compares two roots. Subtrees with equal CIDs are skipped without being read. A subtree that
 exists on only one side is reported once, at its top, as `added` or `removed`. An entity whose own record differs is
@@ -152,9 +219,11 @@ each entity's CID and recompute only entities whose tables changed (Flecs table 
   does not know, and so does `diff`. The library never guesses.
 - Every component value carries its layout hash. A reader built for certain layouts checks them (`checkLayouts` in
   TS) and refuses a mismatch instead of reading the fields wrongly.
-- Within a version, changes are additive only: new optional keys in records. A reader ignores unknown keys only
-  where this spec allows it, which today means only the top level of the document and root block. Unknown keys
-  inside an entity record or a layout are a reason to refuse it, because they may change what the record means.
+- Readers are strict: every map in a document, root block, entity block or layout record must have exactly the keys
+  this spec lists, layouts must be well formed (rule slots as in "Rules", known primitive names, hash recomputed),
+  and every value must fit its layout. Anything else is refused, because an unknown key may change what the record
+  means. `check::document` in Rust and `checkDocument` in TS do this; the TS reader checks the layout hashes' shape
+  and leaves recomputing them to the Rust reader. Strict readers mean no key can be added within version 1.
 - Anything else needs a new version.
 - Migrations are explicit code, written for one (old layout hash → new layout hash) pair. Nothing converts
   implicitly.
@@ -166,14 +235,17 @@ on the lookup path, so scripts write `(Merge, Text)` without the prefix. It hold
 
 - the `Id` component;
 - the `Merge` relationship and its rules;
+- the `Sync` relationship and its modes;
+- the `Bytes` and `Blob` types;
 - the reserved permission and validation vocabulary below.
 
 ## Merging
 
-Merging is designed here and not implemented in this crate. The rules are data in the world, and the code reads them
-as runtime values: `merge::Rule` is an enum read from the world, never a type parameter. A separate crate in this
-repository implements the merge functions themselves, behind one non-generic `merge(rule, a, b)`. This crate calls
-it through the `Merger` trait.
+The rules are data in the world, and the code reads them as runtime values: `merge::Rule` is an enum read from the
+world, never a type parameter. The `merge` crate in this repository (`merge/`, proven in Lean in `lean/`) implements
+the merge functions behind one non-generic `merge(rule, a, b)`. This crate calls it with `merge::merge_state` and
+`merge::merge_fields`, over the state encoding in "Merge states". `Text` has no merge function yet and is refused
+there. Applying changes to a world is not built.
 
 ### Rules
 
@@ -205,8 +277,16 @@ For each struct member the rule is:
 
 1. the member's own rule;
 2. otherwise the component's rule;
-3. otherwise, if the member is itself a struct, null, meaning it merges field by field by these same steps;
+3. otherwise, if the member is itself a struct (not an array of them), null, meaning it merges field by field by these
+   same steps;
 4. otherwise the default.
+
+A rule on a member or component covers its whole value: the value merges as one under that rule. So inside it, a
+nested struct's members carry no rule (null), and rules declared on the nested type are not used there. With
+`Card { (Merge, LastWriter) }` and `struct Card(pos: Vec2, ...)`, `pos` is one LastWriter register and its `x` and `y`
+slots are null, even if `Vec2` declares rules of its own. Elements of arrays and vectors are covered by the rule of
+the field that holds them. Use `Vec2` as a component, or give `pos` no rule and `Card` none, to merge `x` and `y`
+separately.
 
 Rules are checked against the type:
 
@@ -223,6 +303,42 @@ cheaper but loses data whenever two actors write at once, and a wrong guess ther
 worst outcome of a missing annotation is a visible conflict.
 
 Tags and pairs without values merge as `AddWins`.
+
+### Merge states
+
+`merge_state(rule, a, b)` joins two states of one field; `merge_fields(rules, a, b)` joins two structs' member states
+in declaration order. States are DAG-CBOR, read strictly (exact keys, lists sorted strictly by key, as the merge
+crate's `validate` requires). A stamp is `[wall, counter, actor]` (unsigned integers, compared in that order):
+
+| Rule | State |
+|---|---|
+| `LastWriter` | `{"stamp": stamp, "value": uint}` |
+| `AddWins`, `KeepBoth` | `{"entries": [[stamp, uint], ...], "removed": [stamp, ...]}` |
+| `Counter` | `{"inc": [[actor, uint], ...], "dec": [[actor, uint], ...]}` |
+
+Values are unsigned integers: the merge crate is proven over them, and the caller maps a field value to one (an index
+into the values it holds, for example). The actor is a 64-bit integer in the merge crate, while change blocks name
+actors by 32-byte key; the mapping between them is open.
+
+## Sync modes
+
+`(Sync, Mode)` on a component or tag type says how its values are kept. `Sync` is exclusive; the mode is in the
+layout record (`"sync"`) and so in the layout hash.
+
+| Mode | In the state hash | Change history | Stored |
+|---|---|---|---|
+| `Synced` (the default) | yes | yes | yes |
+| `LatestOnly` | yes | no: only the current value is kept, older values are not retained | yes |
+| `Ephemeral` | no | no | no |
+
+- **Synced** values are in entity blocks and in every change that touches them.
+- **LatestOnly** values are in entity blocks, so the root CID covers them and peers with the same state agree on it.
+  A change carries the new value but a peer need not keep the old ones, and history compaction may drop them. Use it
+  for values whose past is not worth keeping (a view count, a last-seen time).
+- **Ephemeral** values never enter a document, a block or a hash, and neither do their layouts. A pair is Ephemeral
+  when its relationship or its data type is. `World::ephemeral(roots)` returns them as one DAG-CBOR message,
+  `{"version", "layouts", "entities": [{"id", "path", "tags", "pairs", "components"}]}`, listing only entities that
+  have any, for a side channel such as presence or cursors. Removing or changing an Ephemeral value changes no CID.
 
 The hierarchy is a move-safe tree CRDT, following Kleppmann et al. 2021 ("A highly-available move operation for
 replicated trees"). Concurrent moves are ordered by (HLC, actor). A move that would create a cycle is skipped, and

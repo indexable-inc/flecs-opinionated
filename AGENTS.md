@@ -9,5 +9,6 @@
   WASI). Everything above Flecs is Rust in `crates/flecs-snapshot`.
 - The format is SPEC.md. A change to what the library writes is a spec change first: additive within a version,
   otherwise a new version. Layout hashes cover anything that changes how a value is read or merged.
-- `merge/` and `lean/` belong to another lane; call merge rules through `merge::Merger`.
+- `merge/` and `lean/` belong to another lane; call them through `flecs_snapshot::merge` (`merge_state`,
+  `merge_fields`), which converts the DAG-CBOR state encoding (SPEC "Merge states").
 - Build and test with `uv run build.py --test` on a dev host, not a laptop.

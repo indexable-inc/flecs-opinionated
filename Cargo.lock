@@ -130,6 +130,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastcdc"
+version = "5.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0431c3132902a1bed6fe77dcfa5d03844e083f263b81288246a2d43dd7d4b2ad"
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -147,8 +153,10 @@ name = "flecs-snapshot"
 version = "0.1.0"
 dependencies = [
  "cid",
+ "fastcdc",
  "flecs-c",
  "ipld-core",
+ "merge",
  "serde_ipld_dagcbor",
  "sha2",
 ]

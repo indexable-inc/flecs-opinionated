@@ -9,9 +9,18 @@ license = "MIT"
 [lib]
 crate-type = ["rlib", "cdylib", "staticlib"]
 
+[features]
+# The C ABI (include/world.h) as #[no_mangle] exports, plus buf_alloc/buf_free on wasm. Off by default so a crate that
+# depends on this one does not export them from its own cdylib; build.py turns it on for the wasm module and the
+# native libraries.
+ffi = []
+
 [dependencies]
 flecs-c = { path = "../flecs-c" }
+crdt = { package = "merge", path = "../../merge" }
 cid = "0.11"
 ipld-core = "0.4"
 serde_ipld_dagcbor = "0.7"
 sha2 = "0.10"
+# Pinned exactly: blob chunk boundaries, and so blob CIDs, depend on the chunker (SPEC.md, "Blobs").
+fastcdc = "=5.0.0"

@@ -63,6 +63,53 @@ int32_t glue_roots(ecs_world_t *world, ecs_entity_t *out, int32_t cap) {
     return n;
 }
 
+/* Every entity whose type has `id` (a raw walk of the tables, like glue_roots). Same contract as glue_children. */
+int32_t glue_with(const ecs_world_t *world, ecs_id_t id, ecs_entity_t *out, int32_t cap) {
+    int32_t n = 0;
+    ecs_iter_t it = ecs_each_id(world, id);
+    while (ecs_each_next(&it)) {
+        for (int32_t i = 0; i < it.count; i++) {
+            if (n < cap) out[n] = it.entities[i];
+            n++;
+        }
+    }
+    return n;
+}
+
+/* A value being written from Rust: a default-constructed value of one type (ecs_value_new, so its hooks run) and a
+ * meta cursor over it. Rust walks the cursor (ecs_meta_push, ecs_meta_member, ecs_meta_set_*), then copies the value
+ * onto an entity with glue_writer_commit, then frees it. The struct lives here because ecs_meta_cursor_t is large and
+ * returned by value. */
+typedef struct glue_writer_t {
+    ecs_value_t value;
+    ecs_meta_cursor_t cursor;
+} glue_writer_t;
+
+glue_writer_t *glue_writer_new(const ecs_world_t *world, ecs_entity_t type) {
+    glue_writer_t *w = ecs_os_calloc_t(glue_writer_t);
+    if (!w) return NULL;
+    w->value = ecs_value_new(world, type);
+    if (!w->value.ptr) {
+        ecs_os_free(w);
+        return NULL;
+    }
+    w->cursor = ecs_meta_cursor(world, type, w->value.ptr);
+    return w;
+}
+
+ecs_meta_cursor_t *glue_writer_cursor(glue_writer_t *w) { return &w->cursor; }
+
+/* Copies the value onto `entity` as `component` (the type's copy hook runs). */
+void glue_writer_commit(ecs_world_t *world, glue_writer_t *w, ecs_entity_t entity, ecs_id_t component, size_t size) {
+    ecs_set_id(world, entity, component, size, w->value.ptr);
+}
+
+void glue_writer_free(const ecs_world_t *world, glue_writer_t *w) {
+    if (!w) return;
+    ecs_value_fini(world, &w->value);
+    ecs_os_free(w);
+}
+
 /* sizeof and alignof of the structs crates/flecs-c/src/lib.rs mirrors, by index. */
 size_t glue_layout(int32_t which, int32_t align) {
 #define L(T) return align ? _Alignof(T) : sizeof(T)

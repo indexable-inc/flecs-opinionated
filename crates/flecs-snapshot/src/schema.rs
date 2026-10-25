@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use sys::{ecs_entity_t, ecs_world_t};
 
 use crate::merge::Rule;
+use crate::mode::Mode;
 
 pub const SCRIPT: &str = r#"
 sync {
@@ -23,6 +24,17 @@ sync {
   Counter {}
   KeepBoth {}
   Text {}
+
+  // (Sync, Mode) on a component or tag type: how its values are kept (SPEC.md, "Sync modes"). Synced is the default.
+  Sync { Exclusive }
+  Synced {}
+  LatestOnly {}
+  Ephemeral {}
+
+  // Binary data (SPEC.md, "Values"). Bytes is written inline as a CBOR byte string; Blob is cut into raw blocks by
+  // content-defined chunking and written as a CID link.
+  vector Bytes(type: u8)
+  vector Blob(type: u8)
 
   // Reserved, not enforced (SPEC.md, "Permissions").
   // An actor: an entity with its public key. `key` is its raw ed25519 public key in lowercase hex (64 digits): the actor id.
@@ -54,7 +66,11 @@ pub struct Schema {
     pub merge: ecs_entity_t,
     pub validated_by: ecs_entity_t,
     pub writable_by: ecs_entity_t,
+    pub sync: ecs_entity_t,
+    pub bytes: ecs_entity_t,
+    pub blob: ecs_entity_t,
     rules: Vec<(ecs_entity_t, Rule)>,
+    modes: Vec<(ecs_entity_t, Mode)>,
     lookup: Box<[ecs_entity_t; 3]>,
 }
 
@@ -75,6 +91,10 @@ impl Schema {
         for r in Rule::ALL {
             rules.push((lookup(w, &format!("sync.{}", r.name()))?, r));
         }
+        let mut modes = Vec::new();
+        for m in Mode::ALL {
+            modes.push((lookup(w, &format!("sync.{}", m.name()))?, m));
+        }
         // SAFETY: a read of a C global set by ecs_init.
         let core = unsafe { sys::EcsFlecsCore };
         let s = Schema {
@@ -83,7 +103,11 @@ impl Schema {
             merge: lookup(w, "sync.Merge")?,
             validated_by: lookup(w, "sync.ValidatedBy")?,
             writable_by: lookup(w, "sync.WritableBy")?,
+            sync: lookup(w, "sync.Sync")?,
+            bytes: lookup(w, "sync.Bytes")?,
+            blob: lookup(w, "sync.Blob")?,
             rules,
+            modes,
             lookup: Box::new([core, module, 0]),
         };
         // SAFETY: the array is zero-terminated and lives as long as the Schema, which lives as long as the world.
@@ -93,6 +117,10 @@ impl Schema {
 
     pub fn rule(&self, e: ecs_entity_t) -> Option<Rule> {
         self.rules.iter().find(|(x, _)| *x == e).map(|(_, r)| *r)
+    }
+
+    pub fn mode(&self, e: ecs_entity_t) -> Option<Mode> {
+        self.modes.iter().find(|(x, _)| *x == e).map(|(_, m)| *m)
     }
 
     pub fn stable_id(&self, w: *const ecs_world_t, e: ecs_entity_t) -> Option<[u8; 16]> {

@@ -1,6 +1,7 @@
 //! A Flecs world: run scripts in it, then read it back as a document or as blocks.
 
 use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString, c_char};
 use std::sync::Once;
 
@@ -8,6 +9,7 @@ use flecs_c as sys;
 use ipld_core::ipld::Ipld;
 use sys::{ecs_entity_t, ecs_world_t};
 
+use crate::check::{self, Blobs};
 use crate::dag::{self, Blocks};
 use crate::schema::{self, Schema};
 use crate::walk::{self, Walk};
@@ -88,9 +90,16 @@ pub(crate) fn grow(mut f: impl FnMut(*mut ecs_entity_t, i32) -> i32) -> Vec<ecs_
 pub struct World {
     w: *mut ecs_world_t,
     schema: Schema,
+    /// Stable id to entity, built when `set` first needs it and dropped by `run` (which may add entities).
+    ids: Option<HashMap<[u8; 16], ecs_entity_t>>,
 }
 
 impl World {
+    /// A new world with the `sync` module defined.
+    ///
+    /// Flecs's OS hooks (log, abort) are process-wide and set by the first call; the log they fill is per thread. A
+    /// world is used only on the thread that made it (it is not `Send`), and every world in a process should be made on
+    /// one thread, or a Flecs error raised while two threads run worlds can land in the other thread's log.
     pub fn new() -> Result<World, String> {
         static INIT: Once = Once::new();
         // SAFETY: sets Flecs's process-wide OS hooks once, before any world exists.
@@ -106,14 +115,161 @@ impl World {
             unsafe { sys::ecs_fini(w) };
             return Err(format!("defining the sync module: {e}"));
         }
-        let schema = Schema::new(w)?;
-        Ok(World { w, schema })
+        let schema = match Schema::new(w) {
+            Ok(s) => s,
+            Err(e) => {
+                // SAFETY: `w` is ours and not used again.
+                unsafe { sys::ecs_fini(w) };
+                return Err(e);
+            }
+        };
+        Ok(World {
+            w,
+            schema,
+            ids: None,
+        })
     }
 
     /// Runs a Flecs script. `name` is the script's name in error messages and in the stable ids it gives new entities.
     pub fn run(&mut self, name: &str, code: &str) -> Result<(), String> {
-        script(self.w, name, code)?;
-        self.assign_ids(name)
+        self.ids = None;
+        // A failed script may have made entities before it stopped: they get ids too, so the world never holds a
+        // user entity without one.
+        let ran = script(self.w, name, code);
+        let ids = self.assign_ids(name);
+        ran?;
+        ids
+    }
+
+    /// The paths of every named root entity, prefabs included, without Flecs's own (`flecs`) and the `sync` module,
+    /// sorted (bytewise). Pass them to `document` or `blocks` to snapshot the whole world.
+    pub fn roots(&self) -> Result<Vec<String>, String> {
+        let w = self.w;
+        // SAFETY: `buf` has room for `cap` ids.
+        let roots = grow(|buf, cap| unsafe { sys::glue_roots(w, buf, cap) });
+        let mut out = Vec::new();
+        for r in roots {
+            if r == self.schema.module {
+                continue;
+            }
+            // SAFETY: plain query; Flecs returns a NUL-terminated name or null.
+            let name = unsafe { sys::ecs_get_name(w, r) };
+            if name.is_null() {
+                continue;
+            }
+            // SAFETY: as above.
+            let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
+            if name != "flecs" {
+                out.push(walk::escape(&name));
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// Sets component `component` (a type path, such as `Title`) on the entity at `path` to `value`. The value has the
+    /// snapshot shape of the component's layout (SPEC.md, "Values") and is checked against it first: a struct needs
+    /// exactly its members, integers must fit, a ref must name an existing entity. A Blob field takes the bytes, not a
+    /// link. The entity and the component must exist; nothing is created. The old value is replaced.
+    pub fn set(&mut self, path: &str, component: &str, value: &Ipld) -> Result<(), String> {
+        let w = self.w;
+        let e = self.lookup(path)?;
+        let c = self.lookup(component)?;
+        let s = &self.schema;
+        if c == s.id_component {
+            return Err("sync.Id is set by the library, never directly".into());
+        }
+        let mut walk = Walk::new(w, s);
+        let size = walk
+            .component_size(c)
+            .map_err(|e| format!("{component}: {e}"))?;
+        let layout = walk.layout(c).map_err(|e| format!("{component}: {e}"))?;
+        check::value(value, &layout, Blobs::Bytes)
+            .map_err(|e| format!("{path}: {component}: {e}"))?;
+        if needs_ids(value) && self.ids.is_none() {
+            self.ids = Some(self.index_ids()?);
+        }
+        let ids = self.ids.as_ref();
+        take_log();
+        // SAFETY: a new writer over a default-constructed value of type `c`, freed below.
+        let wr = unsafe { sys::glue_writer_new(w, c) };
+        if wr.is_null() {
+            return Err(format!("{component}: cannot make a value of it"));
+        }
+        let mut cx = Writer {
+            w,
+            s,
+            // SAFETY: `wr` is live until freed below.
+            cur: unsafe { sys::glue_writer_cursor(wr) },
+            ids,
+        };
+        let r = cx.write(value, &layout).map(|()| {
+            // SAFETY: `wr` holds a value of type `c` of `size` bytes; ecs_set_id copies it with the type's hooks.
+            unsafe { sys::glue_writer_commit(w, wr, e, c, size) }
+        });
+        // SAFETY: freed once.
+        unsafe { sys::glue_writer_free(w, wr) };
+        let log = take_log();
+        r.map_err(|m| format!("{path}: {component}: {m}"))?;
+        if !log.is_empty() {
+            return Err(format!("{path}: {component}: {}", log.join("; ")));
+        }
+        Ok(())
+    }
+
+    /// Renames an entity with Flecs's C API, which (unlike a script) takes any name, `#0` included.
+    #[cfg(test)]
+    pub(crate) fn rename(&mut self, path: &str, name: &str) -> Result<(), String> {
+        let e = self.lookup(path)?;
+        let c = CString::new(name).map_err(|_| "NUL in name")?;
+        // SAFETY: plain call with a NUL-terminated name.
+        unsafe { sys::ecs_set_name(self.w, e, c.as_ptr()) };
+        Ok(())
+    }
+
+    /// The entity at a snapshot path (escaped segments, `#n` for unnamed children).
+    fn lookup(&self, path: &str) -> Result<ecs_entity_t, String> {
+        Walk::new(self.w, &self.schema).resolve(path)
+    }
+
+    /// Runs a walk with the log drained before and after, so its Flecs errors are reported here and never reach a
+    /// later call.
+    fn snapshot(&self, roots: &[&str]) -> Result<walk::Snapshot, String> {
+        take_log();
+        let r = Walk::new(self.w, &self.schema).run(roots);
+        let log = take_log();
+        match r {
+            Err(e) if !log.is_empty() => Err(format!("{e} ({})", log.join("; "))),
+            r => r,
+        }
+    }
+
+    /// Every user entity's stable id. A hash map: lookups are by exact id, never by range.
+    fn index_ids(&self) -> Result<HashMap<[u8; 16], ecs_entity_t>, String> {
+        let w = self.w;
+        let s = &self.schema;
+        let walk = Walk::new(w, s);
+        let mut out = HashMap::new();
+        // SAFETY: `buf` has room for `cap` ids.
+        let mut stack = grow(|buf, cap| unsafe { sys::glue_roots(w, buf, cap) });
+        while let Some(e) = stack.pop() {
+            if let Some(id) = s.stable_id(w, e) {
+                out.insert(id, e);
+            }
+            stack.extend(walk.children(e).into_iter().map(|(_, c)| c));
+        }
+        Ok(out)
+    }
+
+    /// The Ephemeral parts under `roots` (SPEC.md, "Sync modes"): what a presence or cursor channel sends. These are
+    /// never in `document` or `blocks`.
+    pub fn ephemeral(&self, roots: &[&str]) -> Result<Ipld, String> {
+        let snap = self.snapshot(roots)?;
+        Ok(dag::ephemeral(snap))
+    }
+
+    pub fn ephemeral_bytes(&self, roots: &[&str]) -> Result<Vec<u8>, String> {
+        Ok(walk::encode(&self.ephemeral(roots)?))
     }
 
     /// Gives every user entity (not under `flecs` or `sync`) without a stable id the one its path derives.
@@ -145,20 +301,39 @@ impl World {
             }
             stack.push((r, walk::escape(&name)));
         }
+        let mut seen: HashMap<[u8; 16], String> = HashMap::new();
+        let mut clash = None;
         while let Some((e, path)) = stack.pop() {
-            if s.stable_id(w, e).is_none() {
-                s.set_stable_id(w, e, schema::derive_id(script, &path));
+            let id = match s.stable_id(w, e) {
+                Some(id) => id,
+                None => {
+                    let id = schema::derive_id(script, &path);
+                    s.set_stable_id(w, e, id);
+                    id
+                }
+            };
+            if let Some(other) = seen.insert(id, path.clone())
+                && clash.is_none()
+            {
+                clash = Some((other, path.clone()));
             }
             for (seg, c) in walk.children(e) {
                 stack.push((c, format!("{path}.{seg}")));
             }
         }
-        Ok(())
+        // Every entity gets its id before this reports, so one clash does not leave others without ids.
+        match clash {
+            Some((a, b)) => {
+                let (a, b) = if a < b { (a, b) } else { (b, a) };
+                Err(format!("{a} and {b} have the same stable id"))
+            }
+            None => Ok(()),
+        }
     }
 
     /// The world under `roots` as one DAG-CBOR document (SPEC.md, "Document").
     pub fn document(&self, roots: &[&str]) -> Result<Ipld, String> {
-        let snap = Walk::new(self.w, &self.schema).run(roots)?;
+        let snap = self.snapshot(roots)?;
         Ok(dag::document(snap))
     }
 
@@ -168,7 +343,7 @@ impl World {
 
     /// The world under `roots` as blocks: entity blocks linked by CID under one root block (SPEC.md, "Blocks").
     pub fn blocks(&self, roots: &[&str]) -> Result<Blocks, String> {
-        let snap = Walk::new(self.w, &self.schema).run(roots)?;
+        let snap = self.snapshot(roots)?;
         Ok(dag::blocks(snap))
     }
 }
@@ -195,4 +370,188 @@ fn script(w: *mut ecs_world_t, name: &str, code: &str) -> Result<(), String> {
     } else {
         Err(log.join("\n"))
     }
+}
+
+fn needs_ids(v: &Ipld) -> bool {
+    match v {
+        Ipld::Map(m) => m.contains_key("id") || m.values().any(needs_ids),
+        Ipld::List(l) => l.iter().any(needs_ids),
+        _ => false,
+    }
+}
+
+/// Writes a checked value through a Flecs meta cursor, following its layout.
+struct Writer<'a> {
+    w: *mut ecs_world_t,
+    s: &'a Schema,
+    cur: *mut sys::ecs_meta_cursor_t,
+    ids: Option<&'a HashMap<[u8; 16], ecs_entity_t>>,
+}
+
+fn ok(rc: i32, what: &str) -> Result<(), String> {
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(format!("Flecs refused {what}: {}", take_log().join("; ")))
+    }
+}
+
+fn members(l: &BTreeMap<String, Ipld>) -> Vec<(&str, &Ipld)> {
+    match &l["members"] {
+        Ipld::List(ms) => ms
+            .iter()
+            .filter_map(|m| match m {
+                Ipld::List(m) => match (&m[0], &m[1]) {
+                    (Ipld::String(n), l) => Some((n.as_str(), l)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The value of a named constant in an enum or bitmask layout.
+fn constant(l: &BTreeMap<String, Ipld>, name: &str) -> Result<i128, String> {
+    if let Ipld::List(cs) = &l["constants"] {
+        for c in cs {
+            if let Ipld::List(c) = c
+                && let [Ipld::String(n), Ipld::Integer(v)] = c.as_slice()
+                && n == name
+            {
+                return Ok(*v);
+            }
+        }
+    }
+    Err(format!("{name:?} is not a constant"))
+}
+
+impl Writer<'_> {
+    fn entity(&self, r: &Ipld) -> Result<ecs_entity_t, String> {
+        let Ipld::Map(m) = r else {
+            return Err("not a ref".into());
+        };
+        if let Some(Ipld::Bytes(id)) = m.get("id") {
+            let id: [u8; 16] = id.as_slice().try_into().map_err(|_| "id is not 16 bytes")?;
+            return self
+                .ids
+                .and_then(|ids| ids.get(&id).copied())
+                .ok_or_else(|| format!("no entity has the stable id {}", hex(&id)));
+        }
+        if let Some(Ipld::String(p)) = m.get("path") {
+            return Walk::new(self.w, self.s).resolve(p);
+        }
+        Err("not a ref".into())
+    }
+
+    fn bytes(&self, b: &[u8]) -> Result<(), String> {
+        let c = self.cur;
+        // SAFETY: `c` is a live cursor positioned on a vector of u8.
+        unsafe {
+            ok(sys::ecs_meta_push(c), "entering the byte vector")?;
+            for (i, x) in b.iter().enumerate() {
+                if i > 0 {
+                    ok(sys::ecs_meta_next(c), "the next byte")?;
+                }
+                ok(sys::ecs_meta_set_uint(c, *x as u64), "a byte")?;
+            }
+            ok(sys::ecs_meta_pop(c), "leaving the byte vector")
+        }
+    }
+
+    fn elements(&mut self, items: &[Ipld], l: &Ipld) -> Result<(), String> {
+        let c = self.cur;
+        // SAFETY: `c` is a live cursor positioned on an array or vector.
+        unsafe { ok(sys::ecs_meta_push(c), "entering a collection")? };
+        for (i, x) in items.iter().enumerate() {
+            if i > 0 {
+                // SAFETY: as above.
+                unsafe { ok(sys::ecs_meta_next(c), "the next element")? };
+            }
+            self.write(x, l)?;
+        }
+        // SAFETY: as above.
+        unsafe { ok(sys::ecs_meta_pop(c), "leaving a collection") }
+    }
+
+    /// `v` was checked against `l` by `check::value`, so shapes match here.
+    fn write(&mut self, v: &Ipld, l: &Ipld) -> Result<(), String> {
+        let c = self.cur;
+        match (l, v) {
+            (Ipld::String(p), _) => {
+                // SAFETY: `c` is a live cursor positioned on a value of primitive layout `p`.
+                unsafe {
+                    match (p.as_str(), v) {
+                        ("bytes" | "blob", Ipld::Bytes(b)) => self.bytes(b),
+                        (_, Ipld::Null) => ok(sys::ecs_meta_set_null(c), "null"),
+                        (_, Ipld::Bool(b)) => ok(sys::ecs_meta_set_bool(c, *b), "a bool"),
+                        (_, Ipld::Integer(i)) if *i < 0 => {
+                            ok(sys::ecs_meta_set_int(c, *i as i64), "an integer")
+                        }
+                        (_, Ipld::Integer(i)) => {
+                            ok(sys::ecs_meta_set_uint(c, *i as u64), "an integer")
+                        }
+                        (_, Ipld::Float(f)) => ok(sys::ecs_meta_set_float(c, *f), "a float"),
+                        (_, Ipld::String(s)) => {
+                            let s = CString::new(s.as_str())
+                                .map_err(|_| "a string contains a NUL byte")?;
+                            ok(sys::ecs_meta_set_string(c, s.as_ptr()), "a string")
+                        }
+                        ("id", Ipld::List(pair)) => {
+                            let (r, t) = (self.entity(&pair[0])?, self.entity(&pair[1])?);
+                            ok(sys::ecs_meta_set_id(c, sys::pair(r, t)), "a pair")
+                        }
+                        ("id", r) => ok(sys::ecs_meta_set_id(c, self.entity(r)?), "an id"),
+                        (_, r) => ok(sys::ecs_meta_set_entity(c, self.entity(r)?), "an entity"),
+                    }
+                }
+            }
+            (Ipld::Map(m), Ipld::Map(vm)) if m.contains_key("struct") => {
+                // SAFETY: `c` is a live cursor positioned on a struct.
+                unsafe { ok(sys::ecs_meta_push(c), "entering a struct")? };
+                for (name, ml) in members(m) {
+                    let n = CString::new(name).map_err(|_| "member name contains a NUL byte")?;
+                    // SAFETY: as above.
+                    unsafe { ok(sys::ecs_meta_member(c, n.as_ptr()), "a member")? };
+                    self.write(&vm[name], ml)
+                        .map_err(|e| format!("{name}: {e}"))?;
+                }
+                // SAFETY: as above.
+                unsafe { ok(sys::ecs_meta_pop(c), "leaving a struct") }
+            }
+            (Ipld::Map(m), Ipld::String(name)) if m.contains_key("enum") => {
+                let v = constant(m, name)?;
+                // SAFETY: `c` is a live cursor positioned on an enum.
+                unsafe {
+                    if v < 0 {
+                        ok(sys::ecs_meta_set_int(c, v as i64), "an enum")
+                    } else {
+                        ok(sys::ecs_meta_set_uint(c, v as u64), "an enum")
+                    }
+                }
+            }
+            (Ipld::Map(m), Ipld::List(names)) if m.contains_key("bitmask") => {
+                let mut bits = 0u64;
+                for n in names {
+                    if let Ipld::String(n) = n {
+                        bits |= constant(m, n)? as u64;
+                    }
+                }
+                // SAFETY: `c` is a live cursor positioned on a bitmask.
+                unsafe { ok(sys::ecs_meta_set_uint(c, bits), "a bitmask") }
+            }
+            (Ipld::Map(m), Ipld::List(items)) if m.contains_key("array") => {
+                self.elements(items, &m["array"])
+            }
+            (Ipld::Map(m), Ipld::List(items)) if m.contains_key("vector") => {
+                self.elements(items, &m["vector"])
+            }
+            _ => Err("the value does not fit its layout".into()),
+        }
+    }
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }

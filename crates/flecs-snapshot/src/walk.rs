@@ -3,18 +3,29 @@
 //! Entities are referred to by stable id, or by path when they have none (Flecs's builtins); never by Flecs id.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::{CStr, CString, c_char};
+use std::ffi::{CStr, c_char};
 
 use flecs_c as sys;
 use ipld_core::ipld::Ipld;
 use sha2::{Digest, Sha256};
 use sys::{ecs_entity_t, ecs_id_t, ecs_world_t};
 
+use cid::Cid;
+
+use crate::dag::{self, DAG_CBOR, RAW};
 use crate::merge::Rule;
+use crate::mode::Mode;
 use crate::schema::Schema;
 
 /// Children of one parent past this count are refused for now (SPEC.md, "Large child sets").
 pub const MAX_CHILDREN: usize = 4096;
+
+/// Blob chunking (SPEC.md, "Blobs"): FastCDC 2020 (fastcdc 5.0.0, normalization level 1, seed 0) with these sizes.
+pub const CHUNK_MIN: usize = 16 * 1024;
+pub const CHUNK_AVG: usize = 64 * 1024;
+pub const CHUNK_MAX: usize = 256 * 1024;
+/// A blob's chunk list is one block; past this many chunks (about 1 GiB at the average size) a blob is refused.
+pub const MAX_CHUNKS: usize = 16384;
 
 /// The ids of Flecs's builtins (C globals, set once the first world exists).
 struct Builtins {
@@ -23,7 +34,9 @@ struct Builtins {
     prefab: ecs_entity_t,
     ordered_children: ecs_entity_t,
     on_instantiate: ecs_entity_t,
-    dont_inherit: ecs_entity_t,
+    inherit: ecs_entity_t,
+    dont_fragment: ecs_entity_t,
+    wildcard: ecs_entity_t,
     exclusive: ecs_entity_t,
     parent_depth: ecs_entity_t,
     identifier: ecs_entity_t,
@@ -48,7 +61,9 @@ impl Builtins {
                 prefab: sys::EcsPrefab,
                 ordered_children: sys::EcsOrderedChildren,
                 on_instantiate: sys::EcsOnInstantiate,
-                dont_inherit: sys::EcsDontInherit,
+                inherit: sys::EcsInherit,
+                dont_fragment: sys::EcsDontFragment,
+                wildcard: sys::EcsWildcard,
                 exclusive: sys::EcsExclusive,
                 parent_depth: sys::EcsParentDepth,
                 identifier: sys::FLECS_IDEcsIdentifierID_,
@@ -88,6 +103,8 @@ pub struct Item {
     pub children: Vec<usize>,
     /// The entity's own fields (SPEC.md, "Entity record"), without path, parent or children.
     pub record: BTreeMap<String, Ipld>,
+    /// Its Ephemeral parts (SPEC.md, "Sync modes"): `{"tags", "pairs", "components"}`, or None if it has none.
+    pub ephemeral: Option<Ipld>,
 }
 
 pub struct Snapshot {
@@ -95,6 +112,10 @@ pub struct Snapshot {
     pub roots: Vec<usize>,
     /// Type path to layout record.
     pub layouts: BTreeMap<String, Ipld>,
+    /// The layout records of the Ephemeral parts' types.
+    pub ephemeral_layouts: BTreeMap<String, Ipld>,
+    /// Blob blocks (raw chunks and chunk lists), each once, in the order the walk first reached them.
+    pub blobs: Vec<(Cid, Vec<u8>)>,
 }
 
 pub type R<T> = Result<T, String>;
@@ -107,9 +128,24 @@ fn cstr(p: *const c_char) -> Option<String> {
     Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
 }
 
-/// A path segment: `\` and `.` escaped with `\`.
+/// A path segment: `\` and `.` escaped with `\`, and a leading `#` too, so a name never reads as an unnamed child's
+/// `#n`.
 pub fn escape(name: &str) -> String {
-    name.replace('\\', "\\\\").replace('.', "\\.")
+    let e = name.replace('\\', "\\\\").replace('.', "\\.");
+    if e.starts_with('#') {
+        format!("\\{e}")
+    } else {
+        e
+    }
+}
+
+/// Puts a member (or `[i]` element) in front of an error's member path: `member pos.x: ...`, `member pts[2].x: ...`.
+pub(crate) fn member_err(name: &str, e: String) -> String {
+    match e.strip_prefix("member ") {
+        Some(rest) if rest.starts_with('[') => format!("member {name}{rest}"),
+        Some(rest) => format!("member {name}.{rest}"),
+        None => format!("member {name}: {e}"),
+    }
 }
 
 fn text(s: impl Into<String>) -> Ipld {
@@ -131,7 +167,7 @@ pub fn encode(v: &Ipld) -> Vec<u8> {
 }
 
 /// The first 8 bytes of SHA-256: a layout's hash.
-fn hash8(bytes: &[u8]) -> Vec<u8> {
+pub fn hash8(bytes: &[u8]) -> Vec<u8> {
     Sha256::digest(bytes)[..8].to_vec()
 }
 
@@ -148,6 +184,16 @@ pub struct Walk<'s> {
     index: HashMap<ecs_entity_t, usize>,
     paths: HashMap<ecs_entity_t, String>,
     layouts: BTreeMap<String, Ipld>,
+    ephemeral_layouts: BTreeMap<String, Ipld>,
+    blobs: Vec<(Cid, Vec<u8>)>,
+    blob_seen: HashSet<Cid>,
+    /// Set while reading an Ephemeral value, where a blob (which needs stored blocks) is refused.
+    in_ephemeral: bool,
+    /// Stable id to the path of the entity that has it, to refuse two entities with one id.
+    stable: HashMap<[u8; 16], String>,
+    /// User types marked DontFragment: their values live outside the entity's type, where the walk does not read
+    /// them, so an entity that has one is refused rather than written without it.
+    dont_fragment: Vec<ecs_entity_t>,
 }
 
 impl<'s> Walk<'s> {
@@ -160,6 +206,12 @@ impl<'s> Walk<'s> {
             index: HashMap::new(),
             paths: HashMap::new(),
             layouts: BTreeMap::new(),
+            ephemeral_layouts: BTreeMap::new(),
+            blobs: Vec::new(),
+            blob_seen: HashSet::new(),
+            in_ephemeral: false,
+            stable: HashMap::new(),
+            dont_fragment: Vec::new(),
         }
     }
 
@@ -257,6 +309,48 @@ impl<'s> Walk<'s> {
         kids
     }
 
+    /// The entity at a snapshot path: segments split at unescaped `.`, each matched exactly against the segments
+    /// `children` gives (so `#n` is an unnamed child and `\\#n` a named one). Never searches parent scopes the way
+    /// `ecs_lookup` does.
+    pub fn resolve(&self, path: &str) -> R<ecs_entity_t> {
+        let mut segs = Vec::new();
+        let mut cur = String::new();
+        let mut it = path.chars();
+        while let Some(ch) = it.next() {
+            match ch {
+                '\\' => {
+                    cur.push(ch);
+                    cur.push(
+                        it.next()
+                            .ok_or_else(|| format!("path {path:?} ends in a lone \\"))?,
+                    );
+                }
+                '.' => segs.push(std::mem::take(&mut cur)),
+                _ => cur.push(ch),
+            }
+        }
+        segs.push(cur);
+        let missing = || format!("no entity named {path}");
+        let first = &segs[0];
+        let roots = crate::world::grow(|buf, cap| {
+            // SAFETY: `buf` has room for `cap` ids.
+            unsafe { sys::glue_roots(self.w.cast_mut(), buf, cap) }
+        });
+        let mut e = roots
+            .into_iter()
+            .find(|r| self.name(*r).is_some_and(|n| escape(&n) == *first))
+            .ok_or_else(missing)?;
+        for seg in &segs[1..] {
+            e = self
+                .children(e)
+                .into_iter()
+                .find(|(s, _)| s == seg)
+                .map(|(_, c)| c)
+                .ok_or_else(missing)?;
+        }
+        Ok(e)
+    }
+
     /// The path of any entity (entities in the snapshot have theirs already).
     pub fn path(&mut self, e: ecs_entity_t) -> R<String> {
         if let Some(i) = self.index.get(&e) {
@@ -321,6 +415,11 @@ impl<'s> Walk<'s> {
         if self.index.contains_key(&e) {
             return Err(format!("{path} is reached twice: the roots overlap"));
         }
+        if let Some(id) = self.s.stable_id(self.w, e)
+            && let Some(other) = self.stable.insert(id, path.clone())
+        {
+            return Err(format!("{other} and {path} have the same stable id"));
+        }
         let i = self.items.len();
         let name = self.name(e);
         self.items.push(Item {
@@ -331,6 +430,7 @@ impl<'s> Walk<'s> {
             name,
             children: Vec::new(),
             record: BTreeMap::new(),
+            ephemeral: None,
         });
         self.index.insert(e, i);
         let kids = self.children(e);
@@ -381,9 +481,9 @@ impl<'s> Walk<'s> {
         let mut seen = HashSet::new();
         let mut layer = vec![e];
         while !layer.is_empty() {
-            let mut next = Vec::new();
+            // The whole layer (every base at this depth) is sorted by path, not each entity's bases on their own.
+            let mut bases = Vec::new();
             for x in layer {
-                let mut bases = Vec::new();
                 for id in self.ids(x) {
                     if sys::is_pair(id) && self.alive(sys::pair_first(id)) == self.b.is_a {
                         let base = self.alive(sys::pair_second(id));
@@ -392,9 +492,9 @@ impl<'s> Walk<'s> {
                         }
                     }
                 }
-                bases.sort();
-                next.extend(bases.into_iter().map(|(_, b)| b));
             }
+            bases.sort();
+            let next: Vec<_> = bases.into_iter().map(|(_, b)| b).collect();
             out.extend(&next);
             layer = next;
         }
@@ -407,39 +507,83 @@ impl<'s> Walk<'s> {
         }
         let mut root_items = Vec::new();
         for root in roots {
-            let c =
-                CString::new(*root).map_err(|_| format!("root {root:?} contains a NUL byte"))?;
-            // SAFETY: plain lookup with a NUL-terminated path.
-            let e = unsafe { sys::ecs_lookup(self.w, c.as_ptr()) };
-            if e == 0 {
-                return Err(format!("no entity named {root}"));
+            let e = self.resolve(root)?;
+            if root_items.is_empty() {
+                let df = self.b.dont_fragment;
+                let all = crate::world::grow(|buf, cap| {
+                    // SAFETY: `buf` has room for `cap` ids.
+                    unsafe { sys::glue_with(self.w, df, buf, cap) }
+                });
+                self.dont_fragment = all.into_iter().filter(|t| !self.is_builtin(*t)).collect();
             }
             let path = self.path(e)?;
             let seg = path.clone();
             root_items.push(self.collect(e, None, seg, path)?);
         }
         for i in 0..self.items.len() {
-            let rec = self
+            let (rec, eph) = self
                 .record(i)
                 .map_err(|m| format!("{}: {m}", self.items[i].path))?;
             self.items[i].record = rec;
+            self.items[i].ephemeral = eph;
         }
         Ok(Snapshot {
             items: self.items,
             roots: root_items,
             layouts: self.layouts,
+            ephemeral_layouts: self.ephemeral_layouts,
+            blobs: self.blobs,
         })
     }
 
-    fn record(&mut self, i: usize) -> R<BTreeMap<String, Ipld>> {
+    /// The sync mode a type declares with `(Sync, Mode)`.
+    fn mode_of(&mut self, e: ecs_entity_t) -> R<Mode> {
+        let t = self.target(e, self.s.sync);
+        if t == 0 {
+            return Ok(Mode::DEFAULT);
+        }
+        match self.s.mode(t) {
+            Some(m) => Ok(m),
+            None => Err(format!("(Sync, {}) is not a sync mode", self.path(t)?)),
+        }
+    }
+
+    /// Whether a part is Ephemeral: its tag or component type is, or a pair's relationship or data type is.
+    fn ephemeral(&mut self, part: Part) -> R<bool> {
+        Ok(match part {
+            Part::Skip => false,
+            Part::Tag(t) => self.mode_of(t)? == Mode::Ephemeral,
+            Part::Component(c) => self.mode_of(c)? == Mode::Ephemeral,
+            Part::Pair(rel, _, ty) => {
+                self.mode_of(rel)? == Mode::Ephemeral
+                    || match ty {
+                        Some(ty) => self.mode_of(ty)? == Mode::Ephemeral,
+                        None => false,
+                    }
+            }
+        })
+    }
+
+    /// The entity's record, and its Ephemeral parts (kept out of the record) if it has any.
+    fn record(&mut self, i: usize) -> R<(BTreeMap<String, Ipld>, Option<Ipld>)> {
         let e = self.items[i].entity;
         let mut tags = Vec::new();
         let mut pairs = Vec::new();
         let mut components = BTreeMap::new();
+        let (mut eph_tags, mut eph_pairs, mut eph_comps) =
+            (Vec::new(), Vec::new(), BTreeMap::new());
         let (mut inh_tags, mut inh_comps, mut inh_pairs) = (Vec::new(), Vec::new(), Vec::new());
         let mut seen: HashSet<ecs_id_t> = HashSet::new();
         let mut seen_rels: HashSet<ecs_entity_t> = HashSet::new();
 
+        for t in self.dont_fragment.clone() {
+            if self.has(e, t) || self.has(e, sys::pair(t, self.b.wildcard)) {
+                return Err(format!(
+                    "{} is DontFragment, which snapshots do not support yet",
+                    self.path(t)?
+                ));
+            }
+        }
         let isa = self.isa(e)?;
         let sources: Vec<_> = std::iter::once(e).chain(isa.iter().copied()).collect();
         for (depth, src) in sources.into_iter().enumerate() {
@@ -458,7 +602,9 @@ impl<'s> Walk<'s> {
                     } else {
                         id
                     };
-                    if self.has(comp, sys::pair(self.b.on_instantiate, self.b.dont_inherit)) {
+                    // Flecs finds a base's part through IsA only when it is (OnInstantiate, Inherit); the default
+                    // (Override) copies it onto the instance, so the instance owns it.
+                    if !self.has(comp, sys::pair(self.b.on_instantiate, self.b.inherit)) {
                         continue;
                     }
                     if let Part::Pair(rel, ..) = part
@@ -469,12 +615,18 @@ impl<'s> Walk<'s> {
                     }
                 }
                 seen.insert(id);
+                let eph = self.ephemeral(part)?;
+                self.in_ephemeral = eph;
                 // SAFETY: plain query; the pointer is valid while the world is unchanged.
                 let ptr = unsafe { sys::ecs_get_id(self.w, src, id) }.cast::<u8>();
                 match part {
                     Part::Skip => {}
                     Part::Tag(t) => {
                         let r = self.reference(t)?;
+                        if eph {
+                            eph_tags.push(r);
+                            continue;
+                        }
                         if !own {
                             inh_tags.push(r.clone());
                         }
@@ -483,12 +635,17 @@ impl<'s> Walk<'s> {
                     Part::Component(c) => {
                         let p = self.path(c)?;
                         let (hash, value) = self
-                            .value(c, ptr)
+                            .value(c, ptr, eph)
                             .map_err(|m| format!("component {p}: {m}"))?;
+                        let v = map([("hash", hash), ("value", value)]);
+                        if eph {
+                            eph_comps.insert(p, v);
+                            continue;
+                        }
                         if !own {
                             inh_comps.push(text(&p));
                         }
-                        components.insert(p, map([("hash", hash), ("value", value)]));
+                        components.insert(p, v);
                     }
                     Part::Pair(rel, tgt, ty) => {
                         seen_rels.insert(rel);
@@ -497,9 +654,13 @@ impl<'s> Walk<'s> {
                         if let Some(ty) = ty {
                             let tp = self.path(ty)?;
                             let (hash, value) = self
-                                .value(ty, ptr)
+                                .value(ty, ptr, eph)
                                 .map_err(|m| format!("pair with data type {tp}: {m}"))?;
                             entry.push(map([("type", text(tp)), ("hash", hash), ("value", value)]));
+                        }
+                        if eph {
+                            eph_pairs.push(Ipld::List(entry));
+                            continue;
                         }
                         if !own {
                             inh_pairs.push(Ipld::List(vec![r, t]));
@@ -509,12 +670,15 @@ impl<'s> Walk<'s> {
                 }
             }
         }
+        self.in_ephemeral = false;
         for v in [
             &mut tags,
             &mut pairs,
             &mut inh_tags,
             &mut inh_comps,
             &mut inh_pairs,
+            &mut eph_tags,
+            &mut eph_pairs,
         ] {
             sort_encoded(v);
         }
@@ -527,6 +691,14 @@ impl<'s> Walk<'s> {
             .stable_id(self.w, e)
             .map_or(Ipld::Null, |id| Ipld::Bytes(id.to_vec()));
         let name = self.items[i].name.clone().map_or(Ipld::Null, Ipld::String);
+        let ephemeral = (!eph_tags.is_empty() || !eph_pairs.is_empty() || !eph_comps.is_empty())
+            .then(|| {
+                map([
+                    ("tags", Ipld::List(eph_tags)),
+                    ("pairs", Ipld::List(eph_pairs)),
+                    ("components", Ipld::Map(eph_comps)),
+                ])
+            });
         let mut rec = BTreeMap::new();
         rec.insert("id".into(), id);
         rec.insert("name".into(), name);
@@ -542,7 +714,12 @@ impl<'s> Walk<'s> {
                 ("pairs", Ipld::List(inh_pairs)),
             ]),
         );
-        Ok(rec)
+        Ok((rec, ephemeral))
+    }
+
+    /// The size of a component type's values, for writing one.
+    pub fn component_size(&self, ty: ecs_entity_t) -> R<usize> {
+        self.size(ty)
     }
 
     fn size(&self, ty: ecs_entity_t) -> R<usize> {
@@ -574,9 +751,29 @@ impl<'s> Walk<'s> {
         }
     }
 
-    /// The layout of a type (SPEC.md, "Layouts"). `rule` is the rule the enclosing member or component gives this
-    /// value; struct members resolve their own.
-    fn layout(&mut self, ty: ecs_entity_t) -> R<Ipld> {
+    /// The layout of a component or pair type (SPEC.md, "Layouts").
+    pub fn layout(&mut self, ty: ecs_entity_t) -> R<Ipld> {
+        self.layout_in(ty, false)
+    }
+
+    /// Whether a type is a struct (merged member by member unless a rule covers it).
+    fn is_struct(&self, ty: ecs_entity_t) -> bool {
+        ty != self.s.bytes
+            && ty != self.s.blob
+            && self.get::<sys::EcsType>(ty, self.b.type_).map(|t| t.kind)
+                == Some(sys::EcsStructType)
+    }
+
+    /// The layout of a type. `covered` is set inside a value that one rule merges whole (a member or component with a
+    /// rule, or an element of an array or vector): there, struct members carry no rule (null), and rules declared
+    /// inside are not used (SPEC.md, "Merge rules").
+    fn layout_in(&mut self, ty: ecs_entity_t, covered: bool) -> R<Ipld> {
+        if ty == self.s.bytes {
+            return Ok(text("bytes"));
+        }
+        if ty == self.s.blob {
+            return Ok(text("blob"));
+        }
         let tp = self
             .path(ty)
             .unwrap_or_else(|_| format!("#{}", ty & 0xffff_ffff));
@@ -590,6 +787,12 @@ impl<'s> Walk<'s> {
                     .get::<sys::EcsPrimitive>(ty, self.b.primitive)
                     .ok_or("no primitive kind")?
                     .kind;
+                if k == sys::EcsUPtr || k == sys::EcsIPtr {
+                    return Err(format!(
+                        "type {tp}: uptr and iptr have the host's pointer width, which differs between native and \
+                         wasm, so they are refused; use u64 or i64"
+                    ));
+                }
                 text(
                     primitive_name(k)
                         .ok_or_else(|| format!("type {tp}: unknown primitive kind {k}"))?,
@@ -598,20 +801,9 @@ impl<'s> Walk<'s> {
             sys::EcsEnumType | sys::EcsBitmaskType => {
                 let bitmask = kind == sys::EcsBitmaskType;
                 let list = self
-                    .constants(ty)?
+                    .constant_values(ty, bitmask)?
                     .into_iter()
-                    .map(|(n, v, u)| {
-                        Ipld::List(vec![
-                            text(n),
-                            Ipld::Integer(if bitmask {
-                                v as u64 as i128
-                            } else if u > i64::MAX as u64 {
-                                u as i128
-                            } else {
-                                v as i128
-                            }),
-                        ])
-                    })
+                    .map(|(n, v)| Ipld::List(vec![text(n), Ipld::Integer(v)]))
                     .collect();
                 let p = self.type_name(ty);
                 if bitmask {
@@ -623,34 +815,41 @@ impl<'s> Walk<'s> {
                         .underlying_type;
                     map([
                         ("enum", p),
-                        ("underlying", self.layout(under)?),
+                        ("underlying", self.layout_in(under, true)?),
                         ("constants", Ipld::List(list)),
                     ])
                 }
             }
             sys::EcsStructType => {
-                let whole = self.rule_of(ty)?;
+                let whole = if covered { None } else { self.rule_of(ty)? };
                 let mut members = Vec::new();
                 for m in self.members(ty)? {
-                    let mut l = self.layout(m.type_)?;
-                    if m.count > 1 {
-                        l = map([("array", l), ("count", Ipld::Integer(m.count as i128))]);
-                    }
-                    let own = if m.entity != 0 {
+                    let own = if m.entity != 0 && !covered {
                         self.rule_of(m.entity)?
                     } else {
                         None
                     };
-                    let nested = matches!(&l, Ipld::Map(x) if x.contains_key("struct"));
-                    // A member's rule overrides the struct's; a nested struct without either merges field by field.
-                    let rule = match own.or(whole) {
-                        Some(r) => Some(r),
-                        None if nested => None,
-                        None => Some(Rule::DEFAULT),
+                    // A member's rule overrides the struct's; a nested struct without either merges field by field;
+                    // anything else gets the default. Inside a covered value no member has a rule of its own.
+                    let nested = m.count <= 1 && self.is_struct(m.type_);
+                    let rule = if covered {
+                        None
+                    } else {
+                        match own.or(whole) {
+                            Some(r) => Some(r),
+                            None if nested => None,
+                            None => Some(Rule::DEFAULT),
+                        }
                     };
+                    let inner = covered || rule.is_some();
+                    let mut l = self
+                        .layout_in(m.type_, inner)
+                        .map_err(|e| member_err(&m.name, e))?;
+                    if m.count > 1 {
+                        l = map([("array", l), ("count", Ipld::Integer(m.count as i128))]);
+                    }
                     if let Some(r) = rule {
-                        r.check(&l)
-                            .map_err(|e| format!("member {}.{}: {e}", tp, m.name))?;
+                        r.check(&l).map_err(|e| member_err(&m.name, e))?;
                     }
                     members.push(Ipld::List(vec![
                         text(m.name),
@@ -669,7 +868,7 @@ impl<'s> Walk<'s> {
                     .ok_or("no array data")?;
                 let (et, n) = (a.type_, a.count);
                 map([
-                    ("array", self.layout(et)?),
+                    ("array", self.layout_in(et, true)?),
                     ("count", Ipld::Integer(n as i128)),
                 ])
             }
@@ -678,7 +877,7 @@ impl<'s> Walk<'s> {
                     .get::<sys::EcsVector>(ty, self.b.vector)
                     .ok_or("no vector data")?
                     .type_;
-                map([("vector", self.layout(et)?)])
+                map([("vector", self.layout_in(et, true)?)])
             }
             sys::EcsOpaqueType => {
                 return Err(format!(
@@ -690,12 +889,17 @@ impl<'s> Walk<'s> {
         })
     }
 
-    /// The layout record of a component or pair type, made once per type: `{"layout", "merge", "writable_by",
+    /// The layout record of a component or pair type, made once per type: `{"layout", "merge", "sync", "writable_by",
     /// "validated_by", "hash"}`, where `merge` is the whole value's rule for a non-struct type (null for structs, whose
     /// members carry theirs) and `hash` is the first 8 bytes of SHA-256 over the record without `hash`.
-    fn layout_record(&mut self, ty: ecs_entity_t) -> R<Ipld> {
+    fn layout_record(&mut self, ty: ecs_entity_t, ephemeral: bool) -> R<Ipld> {
         let tp = self.path(ty)?;
-        if let Some(Ipld::Map(rec)) = self.layouts.get(&tp) {
+        let cache = if ephemeral {
+            &self.ephemeral_layouts
+        } else {
+            &self.layouts
+        };
+        if let Some(Ipld::Map(rec)) = cache.get(&tp) {
             return Ok(rec["hash"].clone());
         }
         let l = self.layout(ty)?;
@@ -716,10 +920,51 @@ impl<'s> Walk<'s> {
         body.insert("merge".to_string(), merge);
         body.insert("writable_by".to_string(), writable_by);
         body.insert("validated_by".to_string(), validated_by);
+        body.insert("sync".to_string(), text(self.mode_of(ty)?.name()));
         let hash = Ipld::Bytes(hash8(&encode(&Ipld::Map(body.clone()))));
         body.insert("hash".to_string(), hash.clone());
-        self.layouts.insert(tp, Ipld::Map(body));
+        if ephemeral {
+            self.ephemeral_layouts.insert(tp, Ipld::Map(body));
+        } else {
+            self.layouts.insert(tp, Ipld::Map(body));
+        }
         Ok(hash)
+    }
+
+    /// (name, value) in registration order. A bitmask constant's value is its first slot (ecs_bitmask_constant_t); an
+    /// enum constant's is `value_unsigned` when the underlying type is unsigned and `value` otherwise, as Flecs keeps
+    /// only the one that matches.
+    fn constant_values(&self, ty: ecs_entity_t, bitmask: bool) -> R<Vec<(String, i128)>> {
+        let unsigned = if bitmask {
+            true
+        } else {
+            let under = self
+                .get::<sys::EcsEnum>(ty, self.b.enum_)
+                .ok_or("no enum data")?
+                .underlying_type;
+            let k = self
+                .get::<sys::EcsPrimitive>(under, self.b.primitive)
+                .ok_or("enum without a primitive underlying type")?
+                .kind;
+            matches!(
+                k,
+                sys::EcsByte | sys::EcsU8 | sys::EcsU16 | sys::EcsU32 | sys::EcsU64 | sys::EcsUPtr
+            )
+        };
+        Ok(self
+            .constants(ty)?
+            .into_iter()
+            .map(|(n, v, u)| {
+                let x = if bitmask {
+                    v as u64 as i128
+                } else if unsigned {
+                    u as i128
+                } else {
+                    v as i128
+                };
+                (n, x)
+            })
+            .collect())
     }
 
     /// (name, signed value, unsigned value) in registration order.
@@ -758,15 +1003,35 @@ impl<'s> Walk<'s> {
     }
 
     /// (layout hash, value) of a component or pair value.
-    fn value(&mut self, ty: ecs_entity_t, ptr: *const u8) -> R<(Ipld, Ipld)> {
+    fn value(&mut self, ty: ecs_entity_t, ptr: *const u8, ephemeral: bool) -> R<(Ipld, Ipld)> {
         if ptr.is_null() {
             return Err("no value".into());
         }
-        let hash = self.layout_record(ty)?;
+        let hash = self.layout_record(ty, ephemeral)?;
         Ok((hash, self.read(ty, ptr)?))
     }
 
     fn read(&mut self, ty: ecs_entity_t, ptr: *const u8) -> R<Ipld> {
+        if ty == self.s.bytes || ty == self.s.blob {
+            // SAFETY: both are vectors of u8: an ecs_vec_t of `count` bytes.
+            let data = unsafe {
+                let v = &*ptr.cast::<sys::ecs_vec_t>();
+                if v.count == 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(v.array.cast::<u8>(), v.count as usize)
+                }
+            };
+            if ty == self.s.bytes {
+                return Ok(Ipld::Bytes(data.to_vec()));
+            }
+            if self.in_ephemeral {
+                return Err(
+                    "a Blob cannot be Ephemeral (it needs stored blocks); use Bytes".into(),
+                );
+            }
+            return self.blob(data).map(Ipld::Link);
+        }
         let tp = self.path(ty).unwrap_or_default();
         let kind = self
             .get::<sys::EcsType>(ty, self.b.type_)
@@ -793,11 +1058,11 @@ impl<'s> Walk<'s> {
                     return Err(format!("enum {tp}: underlying type is not an integer"));
                 };
                 let hit = self
-                    .constants(ty)?
+                    .constant_values(ty, false)?
                     .into_iter()
-                    .find(|(_, v, u)| *v as i128 == raw || *u as i128 == raw);
+                    .find(|(_, v)| *v == raw);
                 match hit {
-                    Some((name, ..)) => Ok(text(name)),
+                    Some((name, _)) => Ok(text(name)),
                     None => Err(format!("value {raw} is not a constant of enum {tp}")),
                 }
             }
@@ -826,13 +1091,15 @@ impl<'s> Walk<'s> {
                     let v = if m.count > 1 {
                         let stride = self.size(m.type_)?;
                         // SAFETY: an inline array of `count` elements.
-                        Ipld::List(
-                            (0..m.count as usize)
-                                .map(|i| self.read(m.type_, unsafe { p.add(i * stride) }))
-                                .collect::<R<_>>()?,
-                        )
+                        (0..m.count as usize)
+                            .map(|i| {
+                                self.read(m.type_, unsafe { p.add(i * stride) })
+                                    .map_err(|e| member_err(&format!("{}[{i}]", m.name), e))
+                            })
+                            .collect::<R<_>>()
+                            .map(Ipld::List)?
                     } else {
-                        self.read(m.type_, p)?
+                        self.read(m.type_, p).map_err(|e| member_err(&m.name, e))?
                     };
                     entries.insert(m.name, v);
                 }
@@ -847,7 +1114,10 @@ impl<'s> Walk<'s> {
                 // SAFETY: an array of `n` elements.
                 Ok(Ipld::List(
                     (0..n)
-                        .map(|i| self.read(et, unsafe { ptr.add(i * stride) }))
+                        .map(|i| {
+                            self.read(et, unsafe { ptr.add(i * stride) })
+                                .map_err(|e| member_err(&format!("[{i}]"), e))
+                        })
                         .collect::<R<_>>()?,
                 ))
             }
@@ -863,12 +1133,54 @@ impl<'s> Walk<'s> {
                 // SAFETY: as above.
                 Ok(Ipld::List(
                     (0..v.count as usize)
-                        .map(|i| self.read(et, unsafe { base.add(i * stride) }))
+                        .map(|i| {
+                            self.read(et, unsafe { base.add(i * stride) })
+                                .map_err(|e| member_err(&format!("[{i}]"), e))
+                        })
                         .collect::<R<_>>()?,
                 ))
             }
             _ => self.layout(ty).map(|_| Ipld::Null), // layout() names the unsupported kind
         }
+    }
+
+    fn keep_blob(&mut self, cid: Cid, bytes: Vec<u8>) {
+        if self.blob_seen.insert(cid) {
+            self.blobs.push((cid, bytes));
+        }
+    }
+
+    /// A blob as blocks (SPEC.md, "Blobs"): one raw block when it is a single chunk, otherwise raw chunks under a
+    /// DAG-CBOR chunk list `[[length, link], ...]`. Returns the link the field holds.
+    fn blob(&mut self, data: &[u8]) -> R<Cid> {
+        let chunks: Vec<_> =
+            fastcdc::v2020::FastCDC::new(data, CHUNK_MIN, CHUNK_AVG, CHUNK_MAX).collect();
+        if chunks.len() <= 1 {
+            let cid = dag::cid_with(RAW, data);
+            self.keep_blob(cid, data.to_vec());
+            return Ok(cid);
+        }
+        if chunks.len() > MAX_CHUNKS {
+            return Err(format!(
+                "a blob of {} bytes has {} chunks; more than {MAX_CHUNKS} is not supported yet",
+                data.len(),
+                chunks.len()
+            ));
+        }
+        let mut list = Vec::with_capacity(chunks.len());
+        for c in chunks {
+            let bytes = &data[c.offset..c.offset + c.length];
+            let cid = dag::cid_with(RAW, bytes);
+            self.keep_blob(cid, bytes.to_vec());
+            list.push(Ipld::List(vec![
+                Ipld::Integer(c.length as i128),
+                Ipld::Link(cid),
+            ]));
+        }
+        let index = encode(&Ipld::List(list));
+        let cid = dag::cid_with(DAG_CBOR, &index);
+        self.keep_blob(cid, index);
+        Ok(cid)
     }
 
     fn primitive(&mut self, kind: i32, p: *const u8) -> R<Ipld> {

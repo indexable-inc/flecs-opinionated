@@ -28,6 +28,18 @@ pub struct ecs_world_t {
     _private: [u8; 0],
 }
 
+/// Opaque: a value plus a meta cursor over it (csrc/glue.c).
+#[repr(C)]
+pub struct glue_writer_t {
+    _private: [u8; 0],
+}
+
+/// Opaque: only ever used through a pointer from `glue_writer_cursor`.
+#[repr(C)]
+pub struct ecs_meta_cursor_t {
+    _private: [u8; 0],
+}
+
 #[repr(C)]
 pub struct ecs_type_t {
     pub array: *mut ecs_id_t,
@@ -168,7 +180,36 @@ unsafe extern "C" {
         cap: i32,
     ) -> i32;
     pub fn glue_roots(world: *mut ecs_world_t, out: *mut ecs_entity_t, cap: i32) -> i32;
+    pub fn glue_with(
+        world: *const ecs_world_t,
+        id: ecs_id_t,
+        out: *mut ecs_entity_t,
+        cap: i32,
+    ) -> i32;
     pub fn glue_layout(which: i32, align: i32) -> usize;
+    pub fn glue_writer_new(world: *const ecs_world_t, ty: ecs_entity_t) -> *mut glue_writer_t;
+    pub fn glue_writer_cursor(w: *mut glue_writer_t) -> *mut ecs_meta_cursor_t;
+    pub fn glue_writer_commit(
+        world: *mut ecs_world_t,
+        w: *mut glue_writer_t,
+        entity: ecs_entity_t,
+        component: ecs_id_t,
+        size: usize,
+    );
+    pub fn glue_writer_free(world: *const ecs_world_t, w: *mut glue_writer_t);
+
+    pub fn ecs_meta_push(c: *mut ecs_meta_cursor_t) -> c_int;
+    pub fn ecs_meta_pop(c: *mut ecs_meta_cursor_t) -> c_int;
+    pub fn ecs_meta_next(c: *mut ecs_meta_cursor_t) -> c_int;
+    pub fn ecs_meta_member(c: *mut ecs_meta_cursor_t, name: *const c_char) -> c_int;
+    pub fn ecs_meta_set_bool(c: *mut ecs_meta_cursor_t, v: bool) -> c_int;
+    pub fn ecs_meta_set_int(c: *mut ecs_meta_cursor_t, v: i64) -> c_int;
+    pub fn ecs_meta_set_uint(c: *mut ecs_meta_cursor_t, v: u64) -> c_int;
+    pub fn ecs_meta_set_float(c: *mut ecs_meta_cursor_t, v: f64) -> c_int;
+    pub fn ecs_meta_set_string(c: *mut ecs_meta_cursor_t, v: *const c_char) -> c_int;
+    pub fn ecs_meta_set_entity(c: *mut ecs_meta_cursor_t, v: ecs_entity_t) -> c_int;
+    pub fn ecs_meta_set_id(c: *mut ecs_meta_cursor_t, v: ecs_id_t) -> c_int;
+    pub fn ecs_meta_set_null(c: *mut ecs_meta_cursor_t) -> c_int;
     pub fn glue_member_offset(which: i32) -> usize;
 
     pub fn ecs_init() -> *mut ecs_world_t;
@@ -210,6 +251,11 @@ unsafe extern "C" {
         path: *const ecs_entity_t,
     ) -> *mut ecs_entity_t;
     pub fn ecs_is_alive(world: *const ecs_world_t, entity: ecs_entity_t) -> bool;
+    pub fn ecs_set_name(
+        world: *mut ecs_world_t,
+        entity: ecs_entity_t,
+        name: *const c_char,
+    ) -> ecs_entity_t;
 
     pub static EcsFlecsCore: ecs_entity_t;
     pub static EcsChildOf: ecs_entity_t;
@@ -218,6 +264,9 @@ unsafe extern "C" {
     pub static EcsOrderedChildren: ecs_entity_t;
     pub static EcsOnInstantiate: ecs_entity_t;
     pub static EcsDontInherit: ecs_entity_t;
+    pub static EcsInherit: ecs_entity_t;
+    pub static EcsDontFragment: ecs_entity_t;
+    pub static EcsWildcard: ecs_entity_t;
     pub static EcsExclusive: ecs_entity_t;
     pub static EcsParentDepth: ecs_entity_t;
     pub static FLECS_IDEcsIdentifierID_: ecs_entity_t;

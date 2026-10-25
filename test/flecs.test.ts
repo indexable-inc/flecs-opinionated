@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { dlopen, FFIType, ptr, toArrayBuffer } from "bun:ffi";
 import * as dagCbor from "@ipld/dag-cbor";
 
-import { cidOf, diff, Flecs, MemoryBlockStore, readCar, type Entity } from "../js/src/index.ts";
+import { checkDocument, cidOf, diff, Flecs, MemoryBlockStore, RAW, readBlob, readCar, type Entity } from "../js/src/index.ts";
+import { CID } from "multiformats/cid";
 
 const root = new URL("..", import.meta.url).pathname;
 const wasmPath = process.env.FLECS_WASM ?? `${root}dist/flecs.wasm`;
@@ -125,9 +126,87 @@ describe("blocks", () => {
   });
 });
 
+describe("api", () => {
+  test("roots, set, ephemeral", () => {
+    using w = world(site);
+    expect(w.roots()).toEqual(["Author", "Card", "Flags", "Labels", "Page", "Status", "Title", "Vec2", "people", "site"]);
+    w.set("site.zeta", "Title", { text: "Zeta again" });
+    expect(byPath(w.snapshot(["site"]).entities)["site.zeta"]!.components["Title"]!.value).toEqual({ text: "Zeta again" });
+    expect(() => w.set("site.zeta", "Title", { txt: "x" })).toThrow(/unknown member/);
+    w.run("cursor.flecs", "struct Cursor(x: f32)\nCursor { (Sync, Ephemeral) }\nsite { Cursor: {3} }");
+    expect(w.snapshot(["site"]).layouts["Cursor"]).toBeUndefined();
+    expect(w.ephemeral(["site"]).entities[0]!.components["Cursor"]!.value).toEqual({ x: 3 });
+  });
+
+  test("blobs are raw blocks read lazily", async () => {
+    using w = world("struct File(body: sync.Blob)\nf { File: {body: []} }");
+    const body = new Uint8Array(300_000).map((_, i) => (i * 2654435761) >>> 24);
+    w.set("f", "File", { body });
+    const set = w.blocks(["f"]);
+    const store = new MemoryBlockStore();
+    store.putAll(set);
+    for (const [cid, bytes] of set.blocks) expect((await cidOf(bytes, cid.code)).equals(cid)).toBe(true);
+    expect(set.blocks.some(([c]) => c.code === RAW)).toBe(true);
+    const link = byPath(w.snapshot(["f"]).entities)["f"]!.components["File"]!.value as { body: CID };
+    expect(await readBlob(link.body, (c) => store.get(c))).toEqual(body);
+  });
+
+  test("unknown keys are refused", () => {
+    using w = world(site);
+    const doc = dagCbor.decode<Record<string, unknown>>(w.snapshotBytes(["site"]));
+    const entities = doc.entities as Record<string, unknown>[];
+    entities[0]!.extra = 1;
+    expect(() => checkDocument(doc)).toThrow(/unknown key "extra"/);
+  });
+});
+
 describe("native", () => {
   const ext = process.platform === "darwin" ? "dylib" : "so";
   const lib = process.env.FLECS_NATIVE ?? `${process.env.CARGO_TARGET_DIR ?? `${root}target`}/release/libflecs_snapshot.${ext}`;
+  test("integer overflow: native and wasm agree (D1)", () => {
+    const { symbols: n } = dlopen(lib, {
+      world_new: { args: [], returns: FFIType.ptr },
+      world_free: { args: [FFIType.ptr], returns: FFIType.void },
+      world_run: { args: [FFIType.ptr, FFIType.ptr, FFIType.u64, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
+      world_document: { args: [FFIType.ptr, FFIType.ptr, FFIType.u64], returns: FFIType.i32 },
+      world_output: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.ptr },
+    });
+    const enc = new TextEncoder();
+    const native = (code: string): [number, Uint8Array] => {
+      const w = n.world_new()!;
+      const [name, c, roots] = [enc.encode("int.flecs"), enc.encode(code), enc.encode("x")];
+      let rc = n.world_run(w, ptr(name), name.length, ptr(c), c.length);
+      if (rc === 0) rc = n.world_document(w, ptr(roots), roots.length);
+      const len = new BigUint64Array(1);
+      const p = n.world_output(w, ptr(len))!;
+      const out = Number(len[0]) ? new Uint8Array(toArrayBuffer(p, 0, Number(len[0]))).slice() : new Uint8Array();
+      n.world_free(w);
+      return [rc, out];
+    };
+    const wasm = (code: string): [number, Uint8Array] => {
+      using w = flecs.world();
+      try {
+        w.run("int.flecs", code);
+        return [0, w.snapshotBytes(["x"])];
+      } catch (e) {
+        return [1, new TextEncoder().encode((e as Error).message)];
+      }
+    };
+    const head = "struct U(v: u64)\nstruct I(v: i64)\n";
+    for (const body of [
+      "x { U: {99999999999999999999} }",
+      "x { I: {-99999999999999999999} }",
+      "x { I: {99999999999999999999} }",
+      "x { U: {18446744073709551615}\n I: {-9223372036854775808} }",
+      "x { U: {18446744073709551616} }",
+    ]) {
+      const [a, b] = [native(head + body), wasm(head + body)];
+      expect(b[0]).toBe(a[0]);
+      expect(b[1]).toEqual(a[1]);
+    }
+    expect(native(head + "x { U: {99999999999999999999} }")[0]).toBe(1);
+  });
+
   test("native and wasm give the same bytes and root CID", () => {
     const { symbols: n } = dlopen(lib, {
       world_new: { args: [], returns: FFIType.ptr },

@@ -3,12 +3,14 @@ dist/. With --test, also runs the Rust tests and the bun tests.
 
     uv run build.py [--test]
 
-Needs cargo (the toolchain in rust-toolchain.toml), bun, and an unwrapped clang and llvm-ar for wasm32
-(CC_wasm32_unknown_unknown, AR_wasm32_unknown_unknown).
+Needs cargo (the toolchain in rust-toolchain.toml), bun, an unwrapped clang and llvm-ar for wasm32
+(CC_wasm32_unknown_unknown, AR_wasm32_unknown_unknown), and binaryen's wasm-opt (WASM_OPT, or on PATH; CI pins
+version_133).
 """
 
 import argparse
 import asyncio
+import gzip
 import os
 import shutil
 import sys
@@ -55,7 +57,11 @@ def target_dir() -> Path:
 
 
 async def build(test: bool) -> None:
-    cargo = ["cargo", "build", "--release", "-p", "flecs-snapshot"]
+    wasm_opt = os.environ.get("WASM_OPT") or shutil.which("wasm-opt")
+    if not wasm_opt:
+        raise StepError("find wasm-opt", ["wasm-opt"], 127, "set WASM_OPT or put binaryen's wasm-opt on PATH")
+    # The C ABI exports are behind the ffi feature (off for crates that depend on flecs-snapshot).
+    cargo = ["cargo", "build", "--release", "-p", "flecs-snapshot", "--features", "ffi"]
     async with asyncio.TaskGroup() as g:
         g.create_task(run("cargo wasm", [*cargo, "--target", WASM_TARGET], 900))
         g.create_task(run("cargo native", cargo, 900))
@@ -64,14 +70,28 @@ async def build(test: bool) -> None:
     shutil.rmtree(dist, ignore_errors=True)
     await run("tsc", ["bun", "x", "tsc", "-p", "tsconfig.json"], 300)
     wasm = target_dir() / WASM_TARGET / "release" / "flecs_snapshot.wasm"
-    shutil.copyfile(wasm, dist / "flecs.wasm")
-    print(f"dist/flecs.wasm: {wasm.stat().st_size} bytes", flush=True)
+    out = dist / "flecs.wasm"
+    # The features rustc's wasm32-unknown-unknown target enables by default; wasm-opt must keep to the same set.
+    features = [
+        "--enable-bulk-memory",
+        "--enable-sign-ext",
+        "--enable-mutable-globals",
+        "--enable-nontrapping-float-to-int",
+        "--enable-multivalue",
+        "--enable-reference-types",
+    ]
+    opt = [wasm_opt, "-Os", *features, "--strip-debug", "--strip-producers", str(wasm), "-o", str(out)]
+    await run("wasm-opt", opt, 600)
+    raw = wasm.stat().st_size
+    size = out.stat().st_size
+    gz = len(gzip.compress(out.read_bytes(), 9))
+    print(f"dist/flecs.wasm: {size} bytes ({gz} gzipped), {raw} before wasm-opt", flush=True)
     if not test:
         return
     ext = "dylib" if sys.platform == "darwin" else "so"
     os.environ.setdefault("FLECS_NATIVE", str(target_dir() / "release" / f"libflecs_snapshot.{ext}"))
     async with asyncio.TaskGroup() as g:
-        g.create_task(run("cargo test", ["cargo", "test", "--workspace"], 900))
+        g.create_task(run("cargo test", ["cargo", "test", "--workspace", "--all-features"], 900))
         g.create_task(run("bun test", ["bun", "test"], 300))
         g.create_task(run("tsc tests", ["bun", "x", "tsc", "-p", "tsconfig.test.json"], 300))
 

@@ -170,10 +170,13 @@ int tolower(int c) { return isupper(c) ? c + 32 : c; }
 
 /* ---- numbers ---- */
 
-static unsigned long long parse_unsigned(const char *s, char **end, int base, bool *neg) {
+/* The digits of an integer, as strtoull reads them. `*over` is set when the magnitude does not fit 64 bits; the value
+ * is then ULLONG_MAX. */
+static unsigned long long parse_unsigned(const char *s, char **end, int base, bool *neg, bool *over) {
     const char *p = s;
     while (isspace((unsigned char)*p)) p++;
     *neg = false;
+    *over = false;
     if (*p == '-' || *p == '+') { *neg = *p == '-'; p++; }
     if ((base == 0 || base == 16) && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
         p += 2;
@@ -192,32 +195,67 @@ static unsigned long long parse_unsigned(const char *s, char **end, int base, bo
         else if (*p >= 'A' && *p <= 'Z') d = *p - 'A' + 10;
         else break;
         if (d >= base) break;
-        v = v * (unsigned long long)base + (unsigned long long)d;
+        if (v > (ULLONG_MAX - (unsigned long long)d) / (unsigned long long)base) *over = true;
+        if (!*over) v = v * (unsigned long long)base + (unsigned long long)d;
     }
+    if (*over) v = ULLONG_MAX;
     if (end) *end = (char *)(p == digits ? s : p);
     return v;
 }
 
+/* Saturating, with errno = ERANGE on overflow, as C requires (and as native libcs do). */
 long long strtoll(const char *restrict s, char **restrict end, int base) {
-    bool neg;
-    unsigned long long v = parse_unsigned(s, end, base, &neg);
-    return neg ? -(long long)v : (long long)v;
+    bool neg, over;
+    unsigned long long v = parse_unsigned(s, end, base, &neg, &over);
+    if (neg) {
+        if (over || v > (unsigned long long)LLONG_MAX + 1) {
+            errno = ERANGE;
+            return LLONG_MIN;
+        }
+        /* v == LLONG_MAX + 1 is LLONG_MIN; negate in unsigned arithmetic so nothing overflows. */
+        return (long long)(0ULL - v);
+    }
+    if (over || v > (unsigned long long)LLONG_MAX) {
+        errno = ERANGE;
+        return LLONG_MAX;
+    }
+    return (long long)v;
 }
 
 unsigned long long strtoull(const char *restrict s, char **restrict end, int base) {
-    bool neg;
-    unsigned long long v = parse_unsigned(s, end, base, &neg);
-    return neg ? (unsigned long long)(-(long long)v) : v;
+    bool neg, over;
+    unsigned long long v = parse_unsigned(s, end, base, &neg, &over);
+    if (over) {
+        errno = ERANGE;
+        return ULLONG_MAX;
+    }
+    return neg ? 0ULL - v : v;
 }
 
-long strtol(const char *restrict s, char **restrict end, int base) { return (long)strtoll(s, end, base); }
-unsigned long strtoul(const char *restrict s, char **restrict end, int base) { return (unsigned long)strtoull(s, end, base); }
+long strtol(const char *restrict s, char **restrict end, int base) {
+    long long v = strtoll(s, end, base);
+    if (v > LONG_MAX) { errno = ERANGE; return LONG_MAX; }
+    if (v < LONG_MIN) { errno = ERANGE; return LONG_MIN; }
+    return (long)v;
+}
+
+unsigned long strtoul(const char *restrict s, char **restrict end, int base) {
+    bool neg, over;
+    unsigned long long v = parse_unsigned(s, end, base, &neg, &over);
+    if (over || v > ULONG_MAX) {
+        errno = ERANGE;
+        return ULONG_MAX;
+    }
+    return neg ? 0UL - (unsigned long)v : (unsigned long)v;
+}
+
 long long atoll(const char *s) { return strtoll(s, NULL, 10); }
 long atol(const char *s) { return strtol(s, NULL, 10); }
 int atoi(const char *s) { return (int)strtol(s, NULL, 10); }
-int abs(int x) { return x < 0 ? -x : x; }
-long labs(long x) { return x < 0 ? -x : x; }
-long long llabs(long long x) { return x < 0 ? -x : x; }
+/* abs(INT_MIN) is undefined in C; these wrap instead of trapping. */
+int abs(int x) { return x < 0 ? (int)(0U - (unsigned)x) : x; }
+long labs(long x) { return x < 0 ? (long)(0UL - (unsigned long)x) : x; }
+long long llabs(long long x) { return x < 0 ? (long long)(0ULL - (unsigned long long)x) : x; }
 
 char *getenv(const char *name) { (void)name; return NULL; }
 int rand(void) { static unsigned x = 2463534242u; x ^= x << 13; x ^= x >> 17; x ^= x << 5; return (int)(x & RAND_MAX); }
@@ -495,11 +533,12 @@ int vsnprintf(char *restrict buf, size_t cap, const char *restrict fmt, va_list 
             }
         }
         if (sp.left) sp.zero = false;
-        int len = 0; /* 0 int, 1 long, 2 long long, -1 short, -2 char, 3 size_t/intmax/ptrdiff */
+        int len = 0; /* 0 int, 1 long, 2 long long, -1 short, -2 char, 3 size_t/ptrdiff_t, 4 intmax_t */
         for (;; p++) {
             if (*p == 'h') len = len == -1 ? -2 : -1;
             else if (*p == 'l') len = len == 1 ? 2 : 1;
-            else if (*p == 'z' || *p == 'j' || *p == 't') len = 3;
+            else if (*p == 'z' || *p == 't') len = 3;
+            else if (*p == 'j') len = 4;
             else if (*p == 'L') len = 2;
             else break;
         }
@@ -512,6 +551,7 @@ int vsnprintf(char *restrict buf, size_t cap, const char *restrict fmt, va_list 
             if (len == 2) v = va_arg(ap, long long);
             else if (len == 1) v = va_arg(ap, long);
             else if (len == 3) v = (long long)va_arg(ap, ptrdiff_t);
+            else if (len == 4) v = (long long)va_arg(ap, intmax_t);
             else v = va_arg(ap, int);
             if (len == -1) v = (short)v;
             if (len == -2) v = (signed char)v;
@@ -528,6 +568,7 @@ int vsnprintf(char *restrict buf, size_t cap, const char *restrict fmt, va_list 
             if (len == 2) v = va_arg(ap, unsigned long long);
             else if (len == 1) v = va_arg(ap, unsigned long);
             else if (len == 3) v = va_arg(ap, size_t);
+            else if (len == 4) v = (unsigned long long)va_arg(ap, uintmax_t);
             else v = va_arg(ap, unsigned int);
             if (len == -1) v = (unsigned short)v;
             if (len == -2) v = (unsigned char)v;

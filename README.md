@@ -50,10 +50,16 @@ await diff(a.root, b.root, (cid) => store.get(cid)); // [{ path: "site.intro", k
 On Cloudflare Workers, import the wasm as a module (`import wasm from "@indexable/flecs-opinionated/flecs.wasm"`)
 and pass it to `Flecs.load(wasm)`.
 
+A world also has `roots()` (the named root paths, sorted), `set(path, component, value)` (one component value,
+checked against its layout; a Blob field takes the bytes) and `ephemeral(roots)` (the `(Sync, Ephemeral)` parts,
+which snapshots leave out).
+
 Other exports:
 
 - `readCar(bytes)`;
-- `cidOf(bytes)`;
+- `cidOf(bytes, codec?)`;
+- `readBlob(link, getBlock)`, which fetches a Blob field's chunks when asked;
+- `checkDocument(value)` and `checkEntity(...)`, the strict readers `snapshot()` and `diff` use;
 - `checkLayouts(doc, known)`, which refuses layouts the reader was not written for;
 - the format types (`Document`, `Entity`, `Layout`, `Ref`, ...).
 
@@ -70,8 +76,12 @@ size_t n; const uint8_t *car = world_output(w, &n);
 world_free(w);
 ```
 
-From Rust, use `flecs_snapshot::World`, which has `run`, `document`, `document_bytes` and `blocks` (giving
-`Blocks::car` and `Blocks::store`). It also exports `diff`, `MemoryStore`, and the reserved `Change` and
+The C ABI (`world_*`, and `buf_alloc`/`buf_free` on wasm) is behind the crate's `ffi` feature, so a crate that
+depends on `flecs-snapshot` does not export those symbols from its own cdylib. build.py turns it on.
+
+From Rust, use `flecs_snapshot::World`, which has `run`, `roots`, `set`, `document`, `document_bytes`, `ephemeral`
+and `blocks` (giving `Blocks::car` and `Blocks::store`). It also exports `diff`, `read_blob`, `MemoryStore`, the
+strict reader `check`, `merge_state` and `merge_fields` (over the `merge` crate), and the reserved `Change` and
 `Countersignature` blocks.
 
 ## What a snapshot holds
@@ -85,15 +95,17 @@ There is one record per entity:
 - the prefabs it is an instance of, nearest first;
 - which parts it inherited.
 
-Children come in declared order under `OrderedChildren`; otherwise they are sorted by name. Each layout record
-holds:
+Children come in declared order under `OrderedChildren`; otherwise they are sorted by name, because Flecs's own
+order depends on creation order and differs between worlds. Each layout record holds:
 
 - the type's full shape;
 - its merge rules, read from `(Merge, Rule)` pairs on components and members;
+- its sync mode, from `(Sync, Synced | LatestOnly | Ephemeral)`;
 - the reserved write and validation restrictions.
 
-All of it is hashed into the layout hash. Readers refuse unknown format versions and mismatched layouts. SPEC.md has
-the exact shapes.
+All of it is hashed into the layout hash. Readers refuse unknown format versions, mismatched layouts and unknown
+keys anywhere in a record. Binary data is `sync.Bytes` (inline) or `sync.Blob` (content-defined chunks as raw blocks,
+shared between versions). SPEC.md has the exact shapes.
 
 ## Build
 
@@ -112,8 +124,8 @@ Requirements:
   `AR_wasm32_unknown_unknown`. A nix cc-wrapper adds host flags and breaks the build.
 
 Flecs is the `vendor/flecs` submodule, pinned to upstream commit 785ea7c96 (v4.1.6-662). It is built with the LOG,
-SCRIPT (with META, DOC and PARSER) and PREFAB addons. The release wasm is about 1.5 MB, built with `opt-level = "s"`
-and no wasm-opt.
+SCRIPT (with META, DOC and PARSER) and PREFAB addons. The release wasm is about 1.35 MB (480 KB gzipped), built with
+`opt-level = "s"` and then `wasm-opt -Os` (binaryen version_133; set `WASM_OPT` or put it on PATH).
 
 ## Why core wasm and DAG-CBOR, not the Component Model
 
@@ -126,17 +138,20 @@ not the bytes on disk. DAG-CBOR is canonical, has a CID link type, and has matur
 
 ## Limits
 
-- **Value types.** Opaque and map types are refused, and so are NaN and infinities, which DAG-CBOR forbids.
+- **Value types.** Opaque and map types, uptr and iptr, and DontFragment components are refused, and so are NaN and
+  infinities, which DAG-CBOR forbids.
 - **Child count.** More than 4096 children under one parent is refused. SPEC.md has the MST plan for lifting this.
 - **Unnamed entities.** They are numbered per world (`#0`, `#1`), so they are not history-independent.
 - **Full rehash.** Each snapshot rehashes the whole subtree; incremental hashing is not built.
 - **Merging, history, permissions, validation and authority** are designed in SPEC.md, and the format has their
   fields, but nothing enforces them yet.
-- **Version and layout checks only.** Readers here check the version and layout hashes, but do not yet refuse
-  unknown keys inside records.
+- **Names like `#5` in scripts.** Flecs reads a quoted `"#5"` entity name as the id 5, and `"#0" { P: {1} }` crashes
+  Flecs. Don't name entities `#` followed by digits.
 - **Extra wasm exports.** The wasm module also exports the C-library shims Flecs links against (malloc, free,
   strtod, ...). Don't call them.
-- **One thread per world.** A world must stay on one thread. Different worlds may live on different threads.
+- **Threads.** A world stays on the thread that made it. Flecs's log and abort hooks are process-wide and set once;
+  the error log they fill is per thread, so worlds on several threads work, but make every world on one thread when
+  you can, so a Flecs error can never be reported on the wrong call.
 
 ## A restricted dialect (proposal)
 
