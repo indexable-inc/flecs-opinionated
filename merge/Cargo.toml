@@ -1,0 +1,16 @@
+[package]
+name = "merge"
+description = "CRDT merge rules (LastWriter, AddWins, Counter, KeepBoth) over a small concrete value model, proven in Lean 4 through Aeneas."
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+serde_json = "1"
+
+[package.metadata.charon]
+preset = "aeneas"

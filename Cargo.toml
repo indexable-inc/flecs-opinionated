@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/flecs-c", "crates/flecs-snapshot"]
+members = ["crates/flecs-c", "crates/flecs-snapshot", "merge"]
 
 [profile.release]
 opt-level = "s"

@@ -12,17 +12,17 @@ dev = ["ruff>=0.14", "pyright>=1.1.407"]
 package = false
 
 [tool.uv.workspace]
-members = []
+members = ["lean"]
 
 [tool.ruff]
 line-length = 120
 target-version = "py313"
-extend-exclude = ["vendor"]
+extend-exclude = ["vendor", "lean/.lake", "lean/.tools"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
 [tool.pyright]
-include = ["build.py"]
+include = ["build.py", "lean/regen.py"]
 pythonVersion = "3.13"
 typeCheckingMode = "strict"

@@ -16,6 +16,8 @@ For the same scripts, native and wasm write the same bytes, and a test checks th
 
 The format, including the designs for merging, history, permissions and validation, is in [SPEC.md](SPEC.md).
 
+The merge rules are pure Rust in `merge/`, proven in Lean 4 through Aeneas in `lean/` ([lean/README.md](lean/README.md)).
+
 ## TypeScript
 
 ```ts

@@ -1,0 +1,9 @@
+[project]
+name = "lean-proofs"
+version = "0.1.0"
+description = "Regenerates the Lean translation of merge/ with Charon and Aeneas and checks the proofs."
+requires-python = ">=3.13"
+dependencies = []
+
+[tool.uv]
+package = false

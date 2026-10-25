@@ -56,3 +56,28 @@ jobs:
               i += size
           print(f"flecs.wasm: {len(data)} bytes, no imports")
           PY
+
+  # merge/ translated by Charon and Aeneas, proven in lean/ (lean/README.md).
+  lean:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: 0.13.4
+      - name: elan
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/v4.2.4/elan-init.sh \
+            | sh -s -- -y --no-modify-path --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            lean/.lake
+            lean/.tools
+          key: lean-${{ hashFiles('lean/lake-manifest.json', 'lean/lean-toolchain', 'lean/regen.py') }}
+      - name: Regenerate the Lean from merge/ and check the proofs
+        run: uv run lean/regen.py --check
