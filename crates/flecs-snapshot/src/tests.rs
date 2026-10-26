@@ -90,8 +90,8 @@ fn deterministic_and_order_independent() {
 
 #[test]
 fn diff_finds_changed_entities() {
-    let base = "struct P(v: i32)\nroot {\n a { P: {1} }\n b { P: {2} }\n c { d {} }\n}\n";
-    let next = "struct P(v: i32)\nroot {\n a { P: {1} }\n b { P: {3} }\n c { e {} }\n}\n";
+    let base = "struct P {\n  v = i32\n}\nroot {\n a { P: {1} }\n b { P: {2} }\n c { d {} }\n}\n";
+    let next = "struct P {\n  v = i32\n}\nroot {\n a { P: {1} }\n b { P: {3} }\n c { e {} }\n}\n";
     let (x, y) = (
         world(base).blocks(&["root"]).unwrap(),
         world(next).blocks(&["root"]).unwrap(),
@@ -152,7 +152,7 @@ fn s(v: &str) -> Ipld {
 /// C1: an unsigned enum's constants keep their values (they were all written as 0).
 #[test]
 fn unsigned_enum_constants() {
-    let w = world("using flecs.meta\nenum U(A: 1, B: 7, {underlying_type: u32})\ne { U: {B} }\n");
+    let w = world("using flecs.meta\nenum U {\n  enum: {underlying_type: u32}\n  A { (constant, u32): {1} }\n  B { (constant, u32): {7} }\n}\ne { U: {B} }\n");
     let doc = w.document(&["e"]).unwrap();
     let l = field(field(field(&doc, "layouts"), "U"), "layout");
     let pair = |n: &str, v: i128| Ipld::List(vec![s(n), Ipld::Integer(v)]);
@@ -168,7 +168,7 @@ fn unsigned_enum_constants() {
 /// C2: a raw value that is no constant of a signed enum is an error (0 used to match the first constant).
 #[test]
 fn signed_enum_raw_zero_is_refused() {
-    let w = world("using flecs.meta\nenum S(A: 5, B: 6)\ne { S }\n");
+    let w = world("using flecs.meta\nenum S {\n  A { (constant, i32): {5} }\n  B { (constant, i32): {6} }\n}\ne { S }\n");
     let e = w.document(&["e"]).unwrap_err();
     assert!(e.contains("value 0 is not a constant of enum S"), "{e}");
 }
@@ -205,7 +205,7 @@ fn duplicate_stable_ids_are_refused() {
 #[test]
 fn hash_names_do_not_collide_with_unnamed_children() {
     // A script cannot name an entity `#0` (Flecs reads that as an id), so the name is set through the C API.
-    let mut w = world("struct P(v: i32)\np {\n  q { P: {1} }\n  _ { P: {2} }\n}\n");
+    let mut w = world("struct P {\n  v = i32\n}\np {\n  q { P: {1} }\n  _ { P: {2} }\n}\n");
     w.rename("p.q", "#0").unwrap();
     let doc = w.document(&["p"]).unwrap();
     let paths: Vec<_> = doc_entities(&doc)
@@ -237,25 +237,20 @@ fn hash_names_do_not_collide_with_unnamed_children() {
     assert_eq!(v("p.#0"), Ipld::Integer(20));
 }
 
-/// D1: an integer literal past u64 is refused (strtoull saturates with ERANGE, as native libc does), and the largest
-/// one fits. bun's native test compares these bytes with wasm's.
+/// D1: an integer literal past u64. The pinned Flecs (vendor/flecs/SOURCE.md) parses literals with strtoull and does
+/// not check ERANGE, so the value saturates at u64::MAX instead of being refused; native and wasm agree (bun's native
+/// test compares the bytes). A pin that refuses it makes this test fail: then assert the error.
 #[test]
-fn integer_overflow_is_refused() {
-    let mut w = World::new().unwrap();
-    assert!(
-        w.run(
-            "big.flecs",
-            "struct U(v: u64)\nx { U: {99999999999999999999} }\n"
-        )
-        .is_err()
-    );
-    let w = world("struct U(v: u64)\nx { U: {18446744073709551615} }\n");
-    let doc = w.document(&["x"]).unwrap();
-    let v = field(
-        field(field(field(entity(&doc, "x"), "components"), "U"), "value"),
-        "v",
-    );
-    assert_eq!(v, &Ipld::Integer(u64::MAX as i128));
+fn integer_literal_past_u64_saturates() {
+    for lit in ["99999999999999999999", "18446744073709551615"] {
+        let w = world(&format!("struct U {{\n  v = u64\n}}\nx {{ U: {{{lit}}} }}\n"));
+        let doc = w.document(&["x"]).unwrap();
+        let v = field(
+            field(field(field(entity(&doc, "x"), "components"), "U"), "value"),
+            "v",
+        );
+        assert_eq!(v, &Ipld::Integer(u64::MAX as i128), "{lit}");
+    }
 }
 
 /// C7: a member's rule covers its whole value, so the nested struct's members carry none.
@@ -280,7 +275,7 @@ fn nested_struct_under_a_rule_is_covered() {
 /// M4: -0.0 is kept as is (DAG-CBOR allows it; it is a distinct float).
 #[test]
 fn negative_zero_is_kept() {
-    let doc = world("struct F(v: f64)\nx { F: {-0.0} }\n")
+    let doc = world("struct F {\n  v = f64\n}\nx { F: {-0.0} }\n")
         .document(&["x"])
         .unwrap();
     let v = field(
@@ -325,7 +320,7 @@ fn roots_and_set() {
 #[test]
 fn bytes_and_blobs() {
     let mut w = world(
-        "struct File(name: string, head: sync.Bytes, body: sync.Blob)\nf { File: {name: \"a\", head: [1, 2, 3], body: []} }\n",
+        "struct File {\n  name = string\n  head = sync.Bytes\n  body = sync.Blob\n}\nf { File: {name: \"a\", head: [1, 2, 3], body: []} }\n",
     );
     // A pseudo-random 1 MiB body, so FastCDC cuts it into several chunks.
     let mut x = 0x2545_f491_4f6c_dd1du64;
@@ -382,7 +377,7 @@ fn bytes_and_blobs() {
 #[test]
 fn sync_modes() {
     let w = world(
-        "struct Cursor(x: f32)\nCursor { (Sync, Ephemeral) }\nstruct Score(v: i32)\nScore { (Sync, LatestOnly) }\ne { Cursor: {1}\n Score: {2} }\n",
+        "struct Cursor {\n  x = f32\n}\nCursor { (Sync, Ephemeral) }\nstruct Score {\n  v = i32\n}\nScore { (Sync, LatestOnly) }\ne { Cursor: {1}\n Score: {2} }\n",
     );
     let doc = w.document(&["e"]).unwrap();
     let comps = field(entity(&doc, "e"), "components");

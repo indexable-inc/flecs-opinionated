@@ -1,4 +1,4 @@
-//! Compiles Flecs's amalgamated source (the vendor/flecs submodule, distr/flecs.c) and csrc/glue.c with cc, for the host
+//! Compiles Flecs's amalgamated source (vendor/flecs/distr/flecs.c, the space game's pin: vendor/flecs/SOURCE.md) and csrc/glue.c with cc, for the host
 //! and for wasm32-unknown-unknown. Adapted from den's vendor/hyperion-flecs-c/build.rs.
 //!
 //! Addons: FLECS_CUSTOM_BUILD plus LOG (error messages), SCRIPT (which pulls in META, DOC and PARSER) and PREFAB. No
@@ -23,7 +23,7 @@ fn main() {
     let flecs = root.join("../../vendor/flecs/distr");
     assert!(
         flecs.join("flecs.c").is_file(),
-        "{} not found: run `git submodule update --init`",
+        "{} not found (vendored: vendor/flecs/SOURCE.md)",
         flecs.join("flecs.c").display()
     );
     let target = env::var("TARGET").expect("TARGET");

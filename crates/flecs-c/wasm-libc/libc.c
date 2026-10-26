@@ -401,8 +401,42 @@ static size_t fixed(char *buf, size_t cap, double v, int prec, bool keep_point) 
     if (prec > 17) prec = 17;
     double scale = pow10i(prec);
     double r = v * scale + 0.5;
+    unsigned long long bits;
+    __builtin_memcpy(&bits, &v, sizeof bits);
+    int exp = (int)((bits >> 52) & 0x7ff) - 1075;
+    if (r >= 1.8e19 && exp >= 0) {
+        /* Too large for integer digits, and an exact integer mant * 2^exp: print every digit, as native libc does,
+         * with a base-1e9 big integer (2^1024 has 309 digits; body[] in fmt_float holds 512). */
+        unsigned long long mant = (bits & ((1ULL << 52) - 1)) | (1ULL << 52);
+        unsigned int limb[40];
+        int nl = 0;
+        while (mant) { limb[nl++] = (unsigned int)(mant % 1000000000u); mant /= 1000000000u; }
+        for (int i = 0; i < exp; i++) {
+            unsigned int carry = 0;
+            for (int j = 0; j < nl; j++) {
+                unsigned long long x = (unsigned long long)limb[j] * 2 + carry;
+                limb[j] = (unsigned int)(x % 1000000000u);
+                carry = (unsigned int)(x / 1000000000u);
+            }
+            if (carry) limb[nl++] = carry;
+        }
+        char tmp[16];
+        int t = 0;
+        unsigned int top = limb[nl - 1];
+        do { tmp[t++] = (char)('0' + top % 10); top /= 10; } while (top);
+        while (t) buf[n++] = tmp[--t];
+        for (int j = nl - 2; j >= 0; j--) {
+            unsigned int x = limb[j];
+            for (int k = 8; k >= 0; k--) { buf[n + (size_t)k] = (char)('0' + x % 10); x /= 10; }
+            n += 9;
+        }
+        if (prec > 0 || keep_point) buf[n++] = '.';
+        for (int i = 0; i < prec; i++) buf[n++] = '0';
+        return n;
+    }
     if (r >= 1.8e19) {
-        /* Too large for integer digits: print the integer part by repeated division. */
+        /* A large value with a fraction (only at a high precision): the integer part by repeated division,
+         * approximate. */
         char tmp[400];
         size_t t = 0;
         double ip = v;

@@ -52,7 +52,7 @@ Errors name the component and the member path inside it, such as `component Card
 `member pts[2].x`.
 
 Binary data uses the two `vector<u8>` types the `sync` module defines, so the choice is in the type, and so in the
-layout (`"bytes"` or `"blob"`): `struct File(name: string, thumb: sync.Bytes, body: sync.Blob)`. Use Bytes for small
+layout (`"bytes"` or `"blob"`): `struct File { name = string; thumb = sync.Bytes; body = sync.Blob }` (one member per line). Use Bytes for small
 values that change together with the rest of the record, and Blob for large ones, so an unchanged body is never
 re-hashed into a new entity block and unchanged chunks are shared between versions. Only `LastWriter` and `KeepBoth`
 apply to them.
@@ -263,7 +263,9 @@ there. Applying changes to a world is not built.
 and it **overrides the component's rule**:
 
 ```
-struct Title(text: string)
+struct Title {
+  text = string
+}
 Title {
   (Merge, LastWriter)
   text { (Merge, Text) }
@@ -283,7 +285,7 @@ For each struct member the rule is:
 
 A rule on a member or component covers its whole value: the value merges as one under that rule. So inside it, a
 nested struct's members carry no rule (null), and rules declared on the nested type are not used there. With
-`Card { (Merge, LastWriter) }` and `struct Card(pos: Vec2, ...)`, `pos` is one LastWriter register and its `x` and `y`
+`Card { (Merge, LastWriter) }` and `struct Card { pos = Vec2 ... }`, `pos` is one LastWriter register and its `x` and `y`
 slots are null, even if `Vec2` declares rules of its own. Elements of arrays and vectors are covered by the rule of
 the field that holds them. Use `Vec2` as a component, or give `pos` no rule and `Card` none, to merge `x` and `y`
 separately.

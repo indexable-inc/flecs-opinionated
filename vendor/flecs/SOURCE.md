@@ -13,4 +13,12 @@ One pin for both repositories, so a host that links its own Flecs (the `host` fe
 worlds") runs this library's glue against the same headers and the same code it was tested with. When the game moves
 its pin, copy its two files here in the same change, and the other way round.
 
+What this pin does not have that later Flecs does (scripts and tests here are written for the pin):
+
+- the type shorthand `struct P(x: f32)`, `enum E(A, B)`, `vector V(type: u8)`. Write `struct P {\n  x = f32\n}`,
+  `enum E {\n  A, B\n}`, `V = vector: {type: u8}`, an inline array member as `m = member: {type: i32, count: 2}`
+  and an enum constant's value as `A { (constant, i32): {5} }`;
+- a range check on integer literals: past u64 the value saturates at u64::MAX (strtoull without ERANGE) instead of
+  being refused. Native and wasm agree.
+
 Licence: MIT (Sander Mertens), `LICENSE`.

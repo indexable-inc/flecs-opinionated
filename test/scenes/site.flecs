@@ -1,19 +1,34 @@
 // A small site: typed components, a prefab, a relationship, ordered children, merge rules.
 using flecs.meta
 
-struct Vec2(x: f32, y: f32)
-enum Status(Draft, Review, Done)
-bitmask Flags(Pinned, Hidden)
+struct Vec2 {
+  x = f32
+  y = f32
+}
+enum Status {
+  Draft, Review, Done
+}
+bitmask Flags {
+  Pinned, Hidden
+}
 
 // A member's rule overrides its component's.
-struct Title(text: string)
+struct Title {
+  text = string
+}
 Title {
   text { (Merge, Text) }
 }
 
-vector Labels(type: string)
+Labels = vector: {type: string}
 
-struct Card(pos: Vec2, views: u64, labels: Labels, corners: {i32, count: 2}, flags: Flags)
+struct Card {
+  pos = Vec2
+  views = u64
+  labels = Labels
+  corners = member: {type: i32, count: 2}
+  flags = Flags
+}
 // Instances share the prefab's Card instead of copying it.
 Card {
   (OnInstantiate, Inherit)

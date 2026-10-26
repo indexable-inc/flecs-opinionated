@@ -14,7 +14,10 @@ use crate::mode::Mode;
 pub const SCRIPT: &str = r#"
 sync {
   // The stable id (SPEC.md, "Stable ids"). Not copied to prefab instances: an instance gets its own.
-  struct Id(hi: u64, lo: u64)
+  struct Id {
+    hi = flecs.meta.u64
+    lo = flecs.meta.u64
+  }
   Id { (OnInstantiate, DontInherit) }
 
   // (Merge, Rule) on a component, or on one of its members (which overrides the component's rule).
@@ -33,12 +36,14 @@ sync {
 
   // Binary data (SPEC.md, "Values"). Bytes is written inline as a CBOR byte string; Blob is cut into raw blocks by
   // content-defined chunking and written as a CID link.
-  vector Bytes(type: u8)
-  vector Blob(type: u8)
+  Bytes = flecs.meta.vector: {type: flecs.meta.u8}
+  Blob = flecs.meta.vector: {type: flecs.meta.u8}
 
   // Reserved, not enforced (SPEC.md, "Permissions").
   // An actor: an entity with its public key. `key` is its raw ed25519 public key in lowercase hex (64 digits): the actor id.
-  struct Actor(key: string)
+  struct Actor {
+    key = flecs.meta.string
+  }
   // Access to a subtree, on a role prefab or an actor (Keyhive's levels: Relay < Read < Edit < Admin). Each level
   // implies the ones below it; a grant covers the entity and everything under it.
   // (CanRelay, subtree): may store and forward its ciphertext blocks, not read them.
@@ -54,7 +59,10 @@ sync {
   // (ValidatedBy, validator) on a component type or a subtree root: every change must pass the validator.
   ValidatedBy {}
   // A validator: a pure predicate named by `name`, at `version` (SPEC.md, "Validation").
-  struct Validator(name: string, version: u32)
+  struct Validator {
+    name = flecs.meta.string
+    version = flecs.meta.u32
+  }
   // (Authority, actor) on a subtree root: changes there need that actor's countersignature.
   Authority { Exclusive }
 }

@@ -27,7 +27,9 @@ const flecs = await Flecs.load(); // the bundled flecs.wasm; or bytes, a URL, a 
 using world = flecs.world();      // worlds are independent; many can coexist
 
 world.run("site.flecs", `
-  struct Title(text: string)
+  struct Title {
+    text = string
+  }
   Title { text { (Merge, Text) } }
   site {
     OrderedChildren
@@ -110,7 +112,6 @@ shared between versions). SPEC.md has the exact shapes.
 ## Build
 
 ```
-git submodule update --init
 uv run build.py          # cargo (wasm + native), bun install, tsc; copies the wasm to dist/flecs.wasm
 uv run build.py --test   # also cargo test, bun test, and a type check of the tests
 ```
@@ -123,8 +124,9 @@ Requirements:
 - an unwrapped clang and llvm-ar (clang 18 or later) for wasm, set as `CC_wasm32_unknown_unknown` and
   `AR_wasm32_unknown_unknown`. A nix cc-wrapper adds host flags and breaks the build.
 
-Flecs is the `vendor/flecs` submodule, pinned to upstream commit 785ea7c96 (v4.1.6-662). It is built with the LOG,
-SCRIPT (with META, DOC and PARSER) and PREFAB addons. The release wasm is about 1.35 MB (480 KB gzipped), built with
+Flecs is vendored in `vendor/flecs`: the amalgamation the space game links, Flecs C `6e4cd338a` (4.1.6) plus the
+game's fork changes, so a host world and this library run the same Flecs (`vendor/flecs/SOURCE.md`). It is built
+with the LOG, SCRIPT (with META, DOC and PARSER) and PREFAB addons. The release wasm is about 1.35 MB (480 KB gzipped), built with
 `opt-level = "s"` and then `wasm-opt -Os` (binaryen version_133; set `WASM_OPT` or put it on PATH).
 
 ## Why core wasm and DAG-CBOR, not the Component Model
