@@ -4,7 +4,7 @@
 //! registers (or checks) its Flecs meta, so a type, its Flecs meta and its layout record cannot disagree.
 //!
 //! `#[derive(Describe)]` writes the description of a struct or enum; this crate implements it for the standard types
-//! and, behind features, for glam, half, bitflags (`describe_bitflags!`) and flecs_ecs's `Entity`.
+//! and, behind features, for glam, glamx (rapier's poses), half, bitflags (`describe_bitflags!`) and flecs_ecs's `Entity`.
 //!
 //! Choices this crate makes for types SPEC.md leaves open:
 //! - `char` is `"u32"` (its code point); restoring a value that is not a Unicode scalar value is an error.
@@ -50,6 +50,8 @@ mod bits;
 mod ecs;
 #[cfg(feature = "glam")]
 mod glam_impls;
+#[cfg(feature = "glamx")]
+mod glamx_impls;
 #[cfg(feature = "half")]
 mod half_impls;
 

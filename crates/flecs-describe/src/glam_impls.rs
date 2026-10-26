@@ -70,11 +70,14 @@ glam_array! {
 }
 use crate::{Describe, Flecs, FlecsMember, FlecsStruct, Ipld, R, Refs, Resolve, member_err};
 
+/// structs named `<crate>.<Type>` with the named fields as members, in this order; fields not listed (glamx's
+/// `Pose3::padding`) are not saved, come back as the type's `Default`, and lie inside the Flecs struct's size
+/// unnamed. `$k` is the crate (`glam`, `glamx`).
 macro_rules! glam_struct {
-    ($($t:ident { $($f:ident: $ft:ty),+ $(,)? })*) => {$(
-        impl Describe for glam::$t {
+    ($k:ident; $($t:ident { $($f:ident: $ft:ty),+ $(,)? })*) => {$(
+        impl Describe for $k::$t {
             fn type_name() -> String {
-                concat!("glam.", stringify!($t)).into()
+                concat!(stringify!($k), ".", stringify!($t)).into()
             }
             fn layout() -> Ipld {
                 struct_layout(
@@ -90,7 +93,7 @@ macro_rules! glam_struct {
             }
             fn from_value(v: &Ipld, ids: &mut dyn Resolve) -> R<Self> {
                 let m = take_struct(v, &[$(stringify!($f)),+])?;
-                let mut out = <glam::$t as Default>::default();
+                let mut out = <$k::$t as Default>::default();
                 $(
                     out.$f = <$ft as Describe>::from_value(get(m, stringify!($f))?, ids)
                         .map_err(|e| member_err(stringify!($f), e))?;
@@ -98,7 +101,7 @@ macro_rules! glam_struct {
                 Ok(out)
             }
             fn flecs() -> Flecs {
-                let v = <glam::$t as Default>::default();
+                let v = <$k::$t as Default>::default();
                 Flecs::Struct(FlecsStruct {
                     name: Self::type_name(),
                     size: core::mem::size_of::<Self>(),
@@ -114,8 +117,11 @@ macro_rules! glam_struct {
         }
     )*};
 }
+#[cfg(feature = "glamx")]
+pub(crate) use glam_struct;
 
 glam_struct! {
+    glam;
     Vec3A { x: f32, y: f32, z: f32 }
     BVec2 { x: bool, y: bool }
     BVec3 { x: bool, y: bool, z: bool }

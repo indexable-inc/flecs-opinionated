@@ -93,7 +93,7 @@ async def build(test: bool) -> None:
     os.environ.setdefault("FLECS_NATIVE", str(target_dir() / "release" / f"libflecs_snapshot.{ext}"))
     async with asyncio.TaskGroup() as g:
         # Not --all-features: flecs-c's `host` links the application's Flecs, which host-check/ supplies.
-        features = "flecs-snapshot/ffi,flecs-describe/glam,flecs-describe/half,flecs-describe/bitflags"
+        features = "flecs-snapshot/ffi,flecs-describe/glam,flecs-describe/glamx,flecs-describe/half,flecs-describe/bitflags"
         g.create_task(run("cargo test", ["cargo", "test", "--workspace", "--features", features], 900))
         # Host mode against flecs_ecs at the space game's pin (its own workspace, patched to vendor/flecs_ecs_sys).
         g.create_task(run("host-check", ["cargo", "test", "--manifest-path", "host-check/Cargo.toml"], 900))

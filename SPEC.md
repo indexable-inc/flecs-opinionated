@@ -551,7 +551,7 @@ The Rust API a host calls (crate `flecs-snapshot`, feature `host`; `crates/flecs
     /// Makes (or finds) the check entity at `path` (by convention under `sync.checks`) and sets its function.
     pub unsafe fn register_check(world: *mut ecs_world_t, path: &str, f: CheckFn) -> Result<ecs_entity_t, String>;
 
-The crate `flecs-describe` (features `flecs_ecs`, `glam`, `half`, `bitflags`):
+The crate `flecs-describe` (features `flecs_ecs`, `glam`, `glamx`, `half`, `bitflags`):
 
     pub trait Describe: Sized + 'static {
         fn type_name() -> String;

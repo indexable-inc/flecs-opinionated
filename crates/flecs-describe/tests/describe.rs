@@ -258,3 +258,71 @@ fn snapshot_uses_the_description() {
     let doc = w.document(&["e"]).unwrap();
     assert_eq!(find(&doc, "Card"), Some(&v));
 }
+
+/// rapier's pose: `glamx.Pose3 {rotation, translation}`; its padding is not saved, and its Flecs struct is the full
+/// 32 bytes with the two members at their measured offsets.
+#[cfg(feature = "glamx")]
+#[test]
+fn glamx_pose3() {
+    let p = glamx::Pose3 {
+        rotation: glam::Quat::from_rotation_y(0.5),
+        translation: glam::Vec3::new(1.0, -2.0, 3.5),
+        padding: 7,
+    };
+    let l = glamx::Pose3::layout();
+    check::described_layout(&l).unwrap();
+    let Ipld::Map(lm) = &l else { panic!() };
+    assert_eq!(lm["struct"], Ipld::String("glamx.Pose3".into()));
+    let Ipld::List(members) = &lm["members"] else {
+        panic!()
+    };
+    let names: Vec<&Ipld> = members
+        .iter()
+        .map(|m| match m {
+            Ipld::List(m) => &m[0],
+            _ => panic!(),
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            &Ipld::String("rotation".into()),
+            &Ipld::String("translation".into())
+        ]
+    );
+
+    let v = p.read(&mut NoRefs).unwrap();
+    check::value(&v, &l, Blobs::Bytes).unwrap();
+    let Ipld::Map(m) = &v else { panic!() };
+    assert!(!m.contains_key("padding"));
+    let back = glamx::Pose3::from_value(&v, &mut NoRefs).unwrap();
+    assert_eq!(
+        (back.rotation, back.translation, back.padding),
+        (p.rotation, p.translation, 0)
+    );
+
+    let Flecs::Struct(s) = glamx::Pose3::flecs() else {
+        panic!("not a struct")
+    };
+    assert_eq!(s.size, core::mem::size_of::<glamx::Pose3>());
+    let offsets: Vec<(String, usize)> = s
+        .members
+        .iter()
+        .map(|m| (m.name.clone(), m.offset))
+        .collect();
+    assert_eq!(
+        offsets,
+        [("rotation".to_string(), 0), ("translation".to_string(), 16)]
+    );
+
+    let mut w = World::new().unwrap();
+    // SAFETY: the world is live and used only here; the component holds Pose3 values.
+    unsafe {
+        let c = component::<glamx::Pose3>(w.as_ptr(), "Pose").unwrap();
+        register::<glamx::Pose3>(w.as_ptr(), c).unwrap();
+    }
+    w.run("scene", "e {}\n").unwrap();
+    w.set("e", "Pose", &v).unwrap();
+    let doc = w.document(&["e"]).unwrap();
+    assert_eq!(find(&doc, "Pose"), Some(&v));
+}
