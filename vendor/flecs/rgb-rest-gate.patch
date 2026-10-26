@@ -1,0 +1,42 @@
+rgb fork of flecs_ecs_sys 0.2.1: REST writes are off unless the world has the entity
+"RestWritable". One change to the amalgamated src/flecs.c (flecs_rest_reply).
+See vendor/flecs_ecs_sys/SOURCE.md. Line numbers are the file with the other rgb changes.
+
+diff --git a/vendor/flecs_ecs_sys/src/flecs.c b/vendor/flecs_ecs_sys/src/flecs.c
+index eb40d7f..1fad64a 100644
+--- a/vendor/flecs_ecs_sys/src/flecs.c
++++ b/vendor/flecs_ecs_sys/src/flecs.c
+@@ -31180,6 +31180,17 @@ bool flecs_rest_get_commands_request(
+     return true;
+ }
+ 
++/* rgb fork: REST writes are off unless the world has the entity
++ * "RestWritable" (the game makes it when DEV_COMMANDS=1; see
++ * vendor/flecs_ecs_sys/SOURCE.md). Upstream lets any caller of the port PUT
++ * and DELETE components, entities, scripts and actions. */
++static
++bool flecs_rest_writable(
++    ecs_world_t *world)
++{
++    return ecs_lookup(world, "RestWritable") != 0;
++}
++
+ static
+ bool flecs_rest_reply(
+     const ecs_http_request_t* req,
+@@ -31246,6 +31257,15 @@ bool flecs_rest_reply(
+             return flecs_rest_get_commands_request(world, impl, req, reply);
+         }
+ 
++    /* rgb fork: no writes without the RestWritable entity */
++    } else if ((req->method == EcsHttpPut || req->method == EcsHttpDelete) &&
++        !flecs_rest_writable(world))
++    {
++        flecs_reply_error(reply,
++            "REST writes are off (start with DEV_COMMANDS=1)");
++        reply->code = 403;
++        return true;
++
+     } else if (req->method == EcsHttpPut) {
+         /* Entity PUT endpoint */
+         if (!ecs_os_strncmp(req->path, "entity/", 7)) {
