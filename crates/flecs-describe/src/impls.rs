@@ -92,6 +92,58 @@ int_impl! {
     isize => "iptr", sys::EcsIPtr;
 }
 
+/// `NonZero<T>` for the integer kinds: the logical type `NonZero<T>` over the physical integer (SPEC.md, "Logical
+/// types"), value the bare integer. Unsigned: `{"logical": "NonZero<u32>", "of": "u32", "rules": {"range": [1,
+/// null]}}`; signed (0 is a hole in the middle of the range): `{"validated": ["sync.checks.NonZero"]}`, the check every
+/// world has. Restoring a zero is refused (a refusal, never a substitute value). Opaque to Flecs (shown as the integer,
+/// not writable): a Flecs Script or REST write of a zero into one would be undefined behaviour in Rust.
+macro_rules! nonzero_impl {
+    ($($t:ty => $name:literal, $signed:literal);* $(;)?) => {$(
+        impl Describe for core::num::NonZero<$t> {
+            fn type_name() -> String {
+                concat!("NonZero<", $name, ">").into()
+            }
+            fn layout() -> Ipld {
+                nonzero_layout(Self::type_name(), $name, $signed)
+            }
+            fn read(&self, _: &mut dyn Refs) -> R<Ipld> {
+                Ok(Ipld::Integer(self.get() as i128))
+            }
+            fn from_value(v: &Ipld, _: &mut dyn Resolve) -> R<Self> {
+                let i = int_of(v, $name)?;
+                let x = <$t>::try_from(i).map_err(|_| format!("{i} does not fit {}", $name))?;
+                core::num::NonZero::new(x)
+                    .ok_or_else(|| concat!("0 is not a NonZero<", $name, "> value").to_string())
+            }
+        }
+    )*};
+}
+
+fn nonzero_layout(name: String, prim: &str, signed: bool) -> Ipld {
+    let rule = if signed {
+        (
+            "validated",
+            Ipld::List(vec![text(flecs_snapshot::logical::NONZERO_CHECK)]),
+        )
+    } else {
+        ("range", Ipld::List(vec![Ipld::Integer(1), Ipld::Null]))
+    };
+    crate::__private::refine(text(prim), Some(name), vec![rule])
+}
+
+nonzero_impl! {
+    u8 => "u8", false;
+    u16 => "u16", false;
+    u32 => "u32", false;
+    u64 => "u64", false;
+    i8 => "i8", true;
+    i16 => "i16", true;
+    i32 => "i32", true;
+    i64 => "i64", true;
+    usize => "uptr", false;
+    isize => "iptr", true;
+}
+
 /// `u128` and `i128` as `{hi, lo}` halves (DAG-CBOR integers stop at 64 bits).
 macro_rules! wide_impl {
     ($t:ty, $name:literal, $hi:ty) => {

@@ -8,6 +8,16 @@
 //!
 //! Choices this crate makes for types SPEC.md leaves open:
 //! - `char` is `"u32"` (its code point); restoring a value that is not a Unicode scalar value is an error.
+//! - `NonZero<T>` (each integer kind but the 128-bit ones) is the logical type `NonZero<T>` over `T` (SPEC.md,
+//!   "Logical types"): `{"logical": "NonZero<u32>", "of": "u32", "rules": {"range": [1, null]}}` for an unsigned `T`,
+//!   the check `sync.checks.NonZero` for a signed one; its value is the bare integer, its hash differs from `T`'s,
+//!   and restoring a zero is refused. Opaque to Flecs (shown, not writable), so Flecs Script and REST cannot write a
+//!   zero into one.
+//! - `&'static T` for a [`Catalog`] `T` is saved as the entry's name (`refers_to` the catalog).
+//! - The derive's refinements: `#[describe(range(min = .., max = ..))]`, `unit = "path"`, `finite` on a field (or on a
+//!   `transparent` type with `logical = "Name"`), and `validate = path` on a type (a `fn(&Self) -> Result<(), String>`
+//!   run by `from_value` and, as the check `sync.checks.<type name>`, by every restore and `set`). The library checks
+//!   a value against its rules before `from_value` sees it; `from_value` itself checks only `validate`.
 //! - `u128` is `{"struct": "u128", "members": [["hi", "u64"], ["lo", "u64"]]}` and `i128` the same with `hi` an `i64`
 //!   (two's complement halves), since DAG-CBOR integers stop at 64 bits.
 //! - `()` and `PhantomData<T>` are structs with no members (`{"struct": null, "members": []}`).
@@ -28,6 +38,7 @@ pub use flecs_describe_derive::Describe;
 pub use flecs_snapshot::described::{Refs, Resolve};
 pub use ipld_core::ipld::Ipld;
 
+mod catalog;
 mod impls;
 mod meta;
 mod register;
@@ -42,8 +53,9 @@ mod glam_impls;
 #[cfg(feature = "half")]
 mod half_impls;
 
+pub use catalog::Catalog;
 pub use meta::{Flecs, FlecsMember, FlecsStruct};
-pub use register::{component, path_of, register};
+pub use register::{Swept, component, describe_all, path_of, register};
 
 pub type R<T> = Result<T, String>;
 
@@ -82,6 +94,11 @@ pub fn member_err(name: &str, e: String) -> String {
         None => format!("member {name}: {e}"),
     }
 }
+
+/// The prefix of a runtime part's type text when the derive made it because the member's type
+/// has no description (not marked `#[describe(runtime)]`): `{"runtime": "implicit:<type>"}`. A
+/// check over saved components refuses those.
+pub const IMPLICIT_RUNTIME: &str = "implicit:";
 
 /// What the derive and the macros call. Not a stable interface.
 #[doc(hidden)]
@@ -232,5 +249,178 @@ pub mod __private {
     /// The name of a type as written (`a::b::Foo` gives `Foo`), spaces removed.
     pub fn type_text(s: &str) -> String {
         s.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    // What the derive's code reaches a member's type through, so a member whose type has no description (a
+    // foreign type, a handle, a channel) is a runtime part instead of a compile error. Autoref specialisation:
+    // `(&&Probe::<T>(PhantomData)).p_layout()` picks `ViaDescribe` when `T: Describe` and `ViaRuntime` otherwise.
+    // In a generic type the choice is made with the type's own bounds (each type parameter `: Describe`).
+
+    pub use linkme;
+
+    /// A type to probe; never holds a value.
+    pub struct Probe<T>(pub core::marker::PhantomData<T>);
+
+    pub trait ViaDescribe<T> {
+        fn p_layout(&self) -> Ipld;
+        fn p_read(&self, v: &T, refs: &mut dyn Refs) -> R<Ipld>;
+        /// `default` is the expansion site's `Default` probe (a generic function cannot probe for it).
+        fn p_from(&self, v: &Ipld, ids: &mut dyn Resolve, default: fn() -> R<T>) -> R<T>;
+        fn p_flecs(&self) -> Flecs;
+    }
+
+    impl<T: Describe> ViaDescribe<T> for &Probe<T> {
+        fn p_layout(&self) -> Ipld {
+            T::layout()
+        }
+        fn p_read(&self, v: &T, refs: &mut dyn Refs) -> R<Ipld> {
+            v.read(refs)
+        }
+        fn p_from(&self, v: &Ipld, ids: &mut dyn Resolve, _default: fn() -> R<T>) -> R<T> {
+            T::from_value(v, ids)
+        }
+        fn p_flecs(&self) -> Flecs {
+            T::flecs()
+        }
+    }
+
+    pub trait ViaRuntime<T> {
+        fn p_layout(&self) -> Ipld;
+        fn p_read(&self, v: &T, refs: &mut dyn Refs) -> R<Ipld>;
+        /// `default` is the expansion site's `Default` probe (a generic function cannot probe for it).
+        fn p_from(&self, v: &Ipld, ids: &mut dyn Resolve, default: fn() -> R<T>) -> R<T>;
+        fn p_flecs(&self) -> Flecs;
+    }
+
+    impl<T> ViaRuntime<T> for Probe<T> {
+        fn p_layout(&self) -> Ipld {
+            runtime_layout(format!(
+                "{}{}",
+                crate::IMPLICIT_RUNTIME,
+                type_text(core::any::type_name::<T>())
+            ))
+        }
+        fn p_read(&self, _v: &T, _refs: &mut dyn Refs) -> R<Ipld> {
+            Ok(Ipld::Null)
+        }
+        fn p_from(&self, v: &Ipld, _ids: &mut dyn Resolve, default: fn() -> R<T>) -> R<T> {
+            expect_null(v, "a runtime part")?;
+            default()
+        }
+        fn p_flecs(&self) -> Flecs {
+            Flecs::Opaque
+        }
+    }
+
+    /// A type whose `Default` a runtime part is restored as, when it has one.
+    pub struct DefaultProbe<T>(pub core::marker::PhantomData<T>);
+
+    pub trait ViaDefault<T> {
+        fn p_default(&self) -> R<T>;
+    }
+
+    impl<T: Default> ViaDefault<T> for &DefaultProbe<T> {
+        fn p_default(&self) -> R<T> {
+            Ok(T::default())
+        }
+    }
+
+    pub trait ViaNoDefault<T> {
+        fn p_default(&self) -> R<T>;
+    }
+
+    impl<T> ViaNoDefault<T> for DefaultProbe<T> {
+        fn p_default(&self) -> R<T> {
+            Err(format!(
+                "{} has no Default, so a runtime part holding it cannot be restored",
+                core::any::type_name::<T>()
+            ))
+        }
+    }
+
+    /// One derived (non-generic) type: its Rust symbol (`type_name`, flecs_ecs's component symbol) and what
+    /// registers its description on the component of that symbol.
+    pub struct Entry {
+        pub symbol: fn() -> &'static str,
+        pub register: unsafe fn(*mut flecs_c::ecs_world_t, flecs_c::ecs_entity_t) -> R<()>,
+    }
+
+    /// Every derived non-generic type in the process.
+    #[linkme::distributed_slice]
+    pub static DESCRIBED: [Entry];
+
+    /// A range bound as the derive writes it (`range(min = 1)`): converted to the physical type's kind by
+    /// [`refine`].
+    pub enum Bound {
+        None,
+        I(i128),
+        F(f64),
+    }
+
+    impl Bound {
+        fn ipld(self) -> Ipld {
+            match self {
+                Bound::None => Ipld::Null,
+                Bound::I(i) => Ipld::Integer(i),
+                Bound::F(f) => Ipld::Float(f),
+            }
+        }
+    }
+
+    /// `("range", [min, max])`.
+    pub fn range_rule(min: Bound, max: Bound) -> (&'static str, Ipld) {
+        ("range", Ipld::List(vec![min.ipld(), max.ipld()]))
+    }
+
+    /// `inner` refined by `rules` (SPEC.md, "Logical types"), folded into one node when `inner` is already refined.
+    /// A rule that does not fit the physical type (a range on a string, two units) is a bug in the type's
+    /// attributes: it panics with the reason when the layout is first made, which registering the type does.
+    pub fn refine(inner: Ipld, name: Option<String>, rules: Vec<(&'static str, Ipld)>) -> Ipld {
+        let rules = rules.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        flecs_snapshot::logical::node(name, inner, rules)
+            .unwrap_or_else(|e| panic!("a described type's refinement is invalid: {e}"))
+    }
+
+    /// The check entity of a derived type's `validate` function: `sync.checks.<type name>`.
+    pub fn check_path(type_name: &str) -> String {
+        format!("sync.checks.{}", crate::register::escape(type_name))
+    }
+
+    /// A check's resolver: a ref reads as no entity (0), as a check sees values, not the world.
+    pub struct NoIds;
+
+    impl Resolve for NoIds {
+        fn entity(&mut self, _: &Ipld) -> R<flecs_c::ecs_entity_t> {
+            Ok(0)
+        }
+    }
+
+    /// One `validate` check: its entity path and its function over a value in its snapshot shape.
+    pub struct Check {
+        pub path: fn() -> String,
+        pub check: flecs_snapshot::logical::CheckFn,
+    }
+
+    /// Every derived type's `validate` check in the process; [`crate::register`] registers them all in the world
+    /// first.
+    #[linkme::distributed_slice]
+    pub static CHECKS: [Check];
+
+    /// A derived type's check: decodes the value as `T`, whose `from_value` runs the type's `validate`.
+    pub fn check_by_decode<T: Describe>(v: &Ipld) -> R<()> {
+        T::from_value(v, &mut NoIds).map(|_| ())
+    }
+
+    /// `register::<T>` as a plain function pointer for an [`Entry`].
+    ///
+    /// # Safety
+    ///
+    /// As [`crate::register`].
+    pub unsafe fn register_entry<T: Describe>(
+        world: *mut flecs_c::ecs_world_t,
+        component: flecs_c::ecs_entity_t,
+    ) -> R<()> {
+        // SAFETY: the caller's contract.
+        unsafe { crate::register::<T>(world, component) }
     }
 }

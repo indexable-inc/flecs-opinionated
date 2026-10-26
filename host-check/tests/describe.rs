@@ -134,3 +134,69 @@ fn described_components_round_trip() {
         assert!(h.scratch.is_empty(), "a runtime field restores its default");
     });
 }
+
+#[derive(Component, Describe, Clone, Debug, PartialEq)]
+pub struct Gear {
+    pub teeth: core::num::NonZero<u32>,
+}
+
+impl Default for Gear {
+    fn default() -> Gear {
+        Gear {
+            teeth: core::num::NonZero::new(1).unwrap(),
+        }
+    }
+}
+
+/// Every `key: from` in the tree becomes `key: to`.
+fn replace(v: &mut ipld_core::ipld::Ipld, key: &str, from: i128, to: i128) {
+    use ipld_core::ipld::Ipld;
+    match v {
+        Ipld::Map(m) => {
+            for (k, x) in m.iter_mut() {
+                if k == key && *x == Ipld::Integer(from) {
+                    *x = Ipld::Integer(to);
+                } else {
+                    replace(x, key, from, to);
+                }
+            }
+        }
+        Ipld::List(l) => l.iter_mut().for_each(|x| replace(x, key, from, to)),
+        _ => {}
+    }
+}
+
+#[test]
+fn restore_refuses_a_broken_rule() {
+    let a = World::new();
+    a.component::<Uid>();
+    a.component::<Persist>();
+    let gear = *a.component::<Gear>().id();
+    // SAFETY: Gear holds Gear values.
+    unsafe { flecs_describe::register::<Gear>(a.ptr_mut().cast(), gear) }.unwrap();
+    a.entity_named("g")
+        .set(Uid { hi: 1, lo: 1 })
+        .add(Persist::id())
+        .set(Gear {
+            teeth: core::num::NonZero::new(12).unwrap(),
+        });
+    let mut tree = host(&a)
+        .document(&Selection::Tagged, &Encode::default())
+        .unwrap();
+    replace(&mut tree, "teeth", 12, 0);
+    let doc = serde_ipld_dagcbor::to_vec(&tree).unwrap();
+
+    let b = World::new();
+    b.component::<Uid>();
+    b.component::<Persist>();
+    let gear = *b.component::<Gear>().id();
+    // SAFETY: as above.
+    unsafe { flecs_describe::register::<Gear>(b.ptr_mut().cast(), gear) }.unwrap();
+    let Err(e) = host(&b).restore(&doc, &Migrations::new(), &mut Restore::default()) else {
+        panic!("a zero NonZero is restored");
+    };
+    assert!(
+        e.contains("member teeth: 0 is below the minimum 1 (NonZero<u32>)"),
+        "{e}"
+    );
+}

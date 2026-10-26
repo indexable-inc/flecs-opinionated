@@ -111,7 +111,7 @@ impl World {
         if w.is_null() {
             return Err("ecs_init failed".into());
         }
-        if let Err(e) = script(w, "sync", schema::SCRIPT) {
+        if let Err(e) = schema::define(w) {
             // SAFETY: `w` is ours.
             unsafe { sys::ecs_fini(w) };
             return Err(format!("defining the sync module: {e}"));
@@ -405,6 +405,8 @@ pub(crate) fn make_value(
     layout: &Ipld,
     ids: &mut dyn Resolve,
 ) -> Result<Value, String> {
+    // A write goes through the type's checks like a restore (SPEC.md, "Logical types").
+    crate::logical::run_checks(w, v, layout)?;
     // SAFETY: a new writer over a default-constructed value of type `ty`, freed by Value's drop.
     let wr = unsafe { sys::glue_writer_new(w, ty) };
     if wr.is_null() {
@@ -560,6 +562,8 @@ impl Writer<'_> {
 
     /// `v` was checked against `l` by `check::value`, so shapes match here.
     fn write(&mut self, v: &Ipld, l: &Ipld) -> Result<(), String> {
+        // A refinement is written as its physical type.
+        let l = crate::logical::physical(l);
         let c = self.cur;
         match (l, v) {
             (Ipld::String(p), _) => {

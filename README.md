@@ -91,7 +91,9 @@ strict reader `check`, `merge_state` and `merge_fields` (over the `merge` crate)
 An application that owns a Flecs world (a game's live state) saves and restores it with `flecs_snapshot::Host`
 (feature `host`), on the world's own `ecs_world_t*`, with one Flecs in the process. `#[derive(Describe)]` (crate
 `flecs-describe`) describes any Rust type, enums with data, options, maps and glam types included, and registers
-the same shape as Flecs meta:
+the same shape as Flecs meta. A member can be refined with logical rules (`#[describe(range(min = 1), unit = "..")]`,
+`NonZero`, a catalog reference, a `validate` check; SPEC.md "Logical types") that every save, restore and set
+enforce, and `flecs_snapshot::compare` says whether a changed record is Safe, NeedsCheck or NeedsMigration:
 
 ```rust
 #[derive(flecs_describe::Describe, Default, Clone)]

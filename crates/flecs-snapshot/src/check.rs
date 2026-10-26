@@ -17,7 +17,7 @@ use crate::walk::{encode, hash8, member_err};
 pub type R<T> = Result<T, String>;
 
 /// Primitive layout names (SPEC.md, "Layouts"), with the integer range of each integer type.
-fn int_range(name: &str) -> Option<(i128, i128)> {
+pub(crate) fn int_range(name: &str) -> Option<(i128, i128)> {
     Some(match name {
         "char" | "i8" => (i8::MIN as i128, i8::MAX as i128),
         "u8" | "byte" => (0, u8::MAX as i128),
@@ -36,7 +36,7 @@ const OTHER_PRIMITIVES: [&str; 10] = [
 ];
 
 /// The float layouts (SPEC.md, "Values"; `f16` and `bf16` come from described types).
-fn is_float(p: &str) -> bool {
+pub(crate) fn is_float(p: &str) -> bool {
     matches!(p, "f32" | "f64" | "f16" | "bf16")
 }
 
@@ -127,6 +127,11 @@ pub fn fill_rules(l: &Ipld, covered: bool, whole: Option<Rule>) -> R<Ipld> {
         return Ok(l.clone());
     };
     let mut out = m.clone();
+    if m.contains_key("logical") {
+        // A refinement changes nothing about merging: its physical layout's slots are filled.
+        out.insert("of".into(), fill_rules(&m["of"], covered, whole)?);
+        return Ok(Ipld::Map(out));
+    }
     if m.contains_key("struct") {
         let mut members = Vec::new();
         for x in list(&m["members"], "members")? {
@@ -195,8 +200,10 @@ pub fn fill_rules(l: &Ipld, covered: bool, whole: Option<Rule>) -> R<Ipld> {
     Ok(Ipld::Map(out))
 }
 
-fn is_struct(l: &Ipld) -> bool {
-    matches!(l, Ipld::Map(m) if m.contains_key("struct"))
+/// Whether a layout is a struct, under any refinement (SPEC.md, "Logical types": a refinement does not change how a
+/// value merges).
+pub fn is_struct(l: &Ipld) -> bool {
+    matches!(crate::logical::physical(l), Ipld::Map(m) if m.contains_key("struct"))
 }
 
 /// `covered`: inside a value one rule merges whole, where no struct member carries a rule (SPEC.md, "Merge rules").
@@ -297,6 +304,9 @@ fn layout_in(l: &Ipld, covered: bool, lenient: bool) -> R<()> {
                     }
                 }
                 Ok(())
+            } else if m.contains_key("logical") {
+                crate::logical::check_node(m)?;
+                layout_in(&m["of"], covered, lenient)
             } else if m.contains_key("runtime") {
                 text(
                     &exact(l, &["runtime"], "runtime layout")?["runtime"],
@@ -572,6 +582,10 @@ pub fn value(v: &Ipld, l: &Ipld, blobs: Blobs) -> R<()> {
             Ipld::Null => Ok(()),
             _ => Err("a runtime value is not null".into()),
         },
+        Ipld::Map(m) if m.contains_key("logical") => {
+            value(v, &m["of"], blobs)?;
+            crate::logical::check_value(v, m)
+        }
         _ => Err("unknown layout".into()),
     }
 }

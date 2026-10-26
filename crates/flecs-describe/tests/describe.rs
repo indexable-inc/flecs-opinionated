@@ -174,7 +174,7 @@ fn unit_enum_layout() {
     assert_eq!(
         l,
         map(&[
-            ("enum", Ipld::String("Mode".into())),
+            ("enum", Ipld::String("describe::Mode".into())),
             ("underlying", Ipld::String("u8".into())),
             (
                 "constants",

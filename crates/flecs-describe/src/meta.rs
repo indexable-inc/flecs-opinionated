@@ -75,6 +75,42 @@ impl Flecs {
         }
     }
 
+    /// What of the value Flecs's reflection can hold with its real memory layout: the whole of an expressible
+    /// type; a struct's expressible members (recursively, each nested struct cut the same way), as a partial Flecs
+    /// struct of the Rust size (Flecs serialises and assigns those members and leaves the rest of the bytes alone,
+    /// as hand-declared partial meta did); none when no member is expressible. An array needs its element whole.
+    pub fn partial(&self) -> Option<Flecs> {
+        match self {
+            Flecs::Struct(s) => {
+                let members: Vec<FlecsMember> = s
+                    .members
+                    .iter()
+                    .filter(|m| m.size > 0)
+                    .filter_map(|m| {
+                        m.ty.partial().map(|ty| FlecsMember {
+                            name: m.name.clone(),
+                            offset: m.offset,
+                            size: m.size,
+                            ty,
+                        })
+                    })
+                    .collect();
+                if members.is_empty() {
+                    None
+                } else {
+                    Some(Flecs::Struct(FlecsStruct {
+                        name: s.name.clone(),
+                        size: s.size,
+                        align: s.align,
+                        members,
+                    }))
+                }
+            }
+            f if f.expressible() => Some(f.clone()),
+            _ => None,
+        }
+    }
+
     fn kind_name(&self) -> &'static str {
         match self {
             Flecs::Primitive(_) => "primitive",
@@ -290,7 +326,10 @@ impl Meta {
 
     /// Adds `s`'s members to `e` (a component of `s`'s size), one at a time with Rust's offsets.
     fn init_struct(&mut self, e: ecs_entity_t, s: &FlecsStruct) -> R<()> {
-        for m in s.members.iter().filter(|m| m.size > 0) {
+        // in offset order (Rust reorders fields; Flecs wants the member at offset 0 first).
+        let mut held: Vec<&FlecsMember> = s.members.iter().filter(|m| m.size > 0).collect();
+        held.sort_by_key(|m| m.offset);
+        for m in held {
             // An array member is an inline array of its element (count) when the element is expressible.
             let (ty, count) = match &m.ty {
                 Flecs::Array { elem, count, .. } => (self.type_of(elem)?, *count as i32),
@@ -492,7 +531,7 @@ enum Shape {
 }
 
 fn shape(l: &Ipld) -> Shape {
-    match l {
+    match flecs_snapshot::logical::physical(l) {
         Ipld::Map(m) if m.contains_key("struct") || m.contains_key("union") => Shape::Map,
         Ipld::Map(m)
             if ["vector", "array", "option", "map", "bitmask"]
@@ -737,8 +776,12 @@ pub(crate) fn check(w: *const ecs_world_t, e: ecs_entity_t, f: &Flecs, path: &st
             }
         }
         (sys::EcsStructType, Flecs::Struct(s)) => {
-            let have = members(w, e).map_err(|x| at(path, x))?;
-            let want: Vec<&FlecsMember> = s.members.iter().filter(|m| m.size > 0).collect();
+            // both in offset order (Flecs holds members in the order they were declared, hand-written meta
+            // in offset order, the derive in declaration order).
+            let mut have = members(w, e).map_err(|x| at(path, x))?;
+            have.sort_by_key(|m| m.offset);
+            let mut want: Vec<&FlecsMember> = s.members.iter().filter(|m| m.size > 0).collect();
+            want.sort_by_key(|m| m.offset);
             for (i, m) in want.iter().enumerate() {
                 let Some(h) = have.get(i) else {
                     return Err(at(path, format!("Flecs has no member {} (the Rust type's member {i})", m.name)));

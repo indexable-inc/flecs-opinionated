@@ -44,7 +44,10 @@ export type Layout =
   /** A value is `[[key, value], ...]`, keys unique and sorted by their DAG-CBOR encoding. */
   | { map: [key: Layout, value: Layout] }
   /** Process-local state: the value is always null. */
-  | { runtime: string };
+  | { runtime: string }
+  /** A logical type (SPEC.md, "Logical types"): the value is `of`'s, which also decides the encoding, and the rules
+   * (`range`, `finite`, `unit`, `refers_to`, `validated`) restrict it. `of` is never itself logical. */
+  | { logical: string | null; of: Layout; rules: Record<string, unknown> };
 
 export interface LayoutRecord {
   /** The type's path without a `V<n>` version suffix (SPEC.md, "Layouts"); see `baseOf`. */
@@ -680,7 +683,17 @@ function checkRule(v: unknown, what: string): Rule | null {
   return v as Rule;
 }
 
-const isStruct = (l: unknown) => typeof l === "object" && l !== null && "struct" in l;
+/** The physical layout under a logical one (SPEC.md, "Logical types"), or `l` itself. */
+export function physicalOf(l: Layout): Layout {
+  return typeof l === "object" && l !== null && "logical" in l ? l.of : l;
+}
+
+const isStruct = (l: unknown) => {
+  const p = typeof l === "object" && l !== null && "logical" in l ? (l as unknown as { of: unknown }).of : l;
+  return typeof p === "object" && p !== null && "struct" in p;
+};
+
+const LOGICAL_RULES: readonly string[] = ["finite", "range", "refers_to", "unit", "validated"];
 
 /** The integer primitives and their ranges (SPEC.md, "Values"). */
 const INT_RANGES: Record<string, [bigint, bigint]> = {
@@ -780,6 +793,33 @@ function checkLayout(l: unknown, covered: boolean): void {
     checkLayout(kv[1], true);
   } else if ("runtime" in l) {
     if (typeof exact(l, ["runtime"], "runtime layout").runtime !== "string") throw new Error("a runtime layout's path is not text");
+  } else if ("logical" in l) {
+    const m = exact(l, ["logical", "of", "rules"], "logical layout");
+    checkName(m.logical, "logical name");
+    if (typeof m.of === "object" && m.of !== null && "logical" in m.of) throw new Error("a logical layout's of is itself logical");
+    if (!isMap(m.rules)) throw new Error("a logical layout's rules are not a map");
+    const keys = Object.keys(m.rules);
+    for (const k of keys) if (!LOGICAL_RULES.includes(k)) throw new Error(`unknown logical rule ${JSON.stringify(k)}`);
+    if (m.logical === null && keys.length === 0) throw new Error("a logical layout with no name and no rule");
+    const of = m.of;
+    const prim = typeof of === "string" ? of : null;
+    const r = m.rules;
+    if ("range" in r) {
+      const b = list(r.range, "range");
+      if (b.length !== 2 || prim === null || !(prim in INT_RANGES || FLOATS.includes(prim))) {
+        throw new Error("rule range is not [min, max] on a number");
+      }
+      for (const x of b) if (x !== null && !(isInt(x) || typeof x === "number")) throw new Error("a range bound is not a number or null");
+    }
+    if ("finite" in r && (r.finite !== null || prim === null || !FLOATS.includes(prim))) throw new Error("rule finite is not null on a float");
+    if ("unit" in r && typeof r.unit !== "string") throw new Error("rule unit is not a path");
+    if ("refers_to" in r) {
+      const c = list(r.refers_to, "refers_to");
+      if (c.length !== 2 || typeof c[0] !== "string" || prim !== "string") throw new Error("rule refers_to is not [catalog, names] on a string");
+      for (const n of list(c[1], "catalog names")) if (typeof n !== "string") throw new Error("a catalog name is not text");
+    }
+    if ("validated" in r) for (const c of list(r.validated, "validated")) if (typeof c !== "string") throw new Error("a check is not a path");
+    checkLayout(of, covered);
   } else throw new Error(`unknown layout kind with keys ${Object.keys(l).join(", ")}`);
 }
 
@@ -912,6 +952,21 @@ function checkValue(v: unknown, l: Layout): void {
     }
   } else if ("runtime" in l) {
     if (v !== null) throw new Error(`a runtime value of ${l.runtime} is ${show(v)}, not null`);
+  } else if ("logical" in l) {
+    checkValue(v, l.of);
+    const named = l.logical === null ? "" : ` (${l.logical})`;
+    const range = l.rules.range as [unknown, unknown] | undefined;
+    if (range) {
+      // Integers compare exactly, floats as numbers (the bounds are in the physical type's kind).
+      const num = (x: unknown) => (typeof x === "bigint" ? x : typeof x === "number" && Number.isInteger(x) && typeof l.of === "string" && l.of in INT_RANGES ? BigInt(x) : (x as number));
+      const [lo, hi] = [range[0], range[1]];
+      if (lo !== null && num(v) < num(lo)) throw new Error(`${show(v)} is below the minimum ${show(lo)}${named}`);
+      if (hi !== null && num(v) > num(hi)) throw new Error(`${show(v)} is above the maximum ${show(hi)}${named}`);
+    }
+    const refers = l.rules.refers_to as [string, string[]] | undefined;
+    if (refers && !refers[1].includes(v as string)) {
+      throw new Error(`${show(v)} is not a name in the catalog ${refers[0]}${named}`);
+    }
   } else throw new Error("unknown layout");
 }
 

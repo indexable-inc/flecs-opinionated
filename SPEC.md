@@ -133,9 +133,10 @@ the hash of its type's record, so a value can never be read with the wrong layou
 - `{"union": path | null, "variants": [[name, L | null], ...]}`, a variant's payload being a struct (a Rust tuple
   variant's members are named `0`, `1`, ...) or null;
 - `{"map": [K, V]}`;
-- `{"runtime": path}`.
+- `{"runtime": path}`;
+- `{"logical": path | null, "of": L, "rules": {rule: arg, ...}}`, a logical type ("Logical types").
 
-`"f16"`, `"bf16"` and the last four kinds come only from described types ("Described types"); a Flecs-only world
+`"f16"`, `"bf16"` and the four kinds from option to runtime come only from described types ("Described types"); a Flecs-only world
 never has them. A Rust tuple or tuple struct is a struct whose members are named `0`, `1`, ...
 
 Constants and members are listed in declaration order. Renaming a member, reordering members, changing a type,
@@ -172,11 +173,82 @@ records' hashes.
 `#[derive(Describe)]` takes, under `#[describe(...)]`: on the type `name = "Path"` and `runtime` (the whole type is
 process-local: layout `{"runtime": name}`, value null, restored as `Default`); on a field `merge = "Rule"`,
 `runtime`, `with = path` (a module with `layout`, `read` and `from_value`) and `name = "member"`; on a variant
-`name = "Variant"`. With `runtime` every Rust type can be described; the space game's 2797 component types (738
+`name = "Variant"`. The logical rules ("Logical types"): on a field `range(min = a, max = b)` (literal bounds, either
+left out), `unit = "path"` and `finite`; on a type `validate = path` (a `fn(&Self) -> Result<(), String>`); and, on a
+`transparent` type only, `logical = "Name"`, `range`, `unit` and `finite`, which make the type a named logical type
+over its field's layout. `core::num::NonZero<T>` is the logical type `NonZero<T>` over `T`, and `&'static T` for a
+`T: Catalog` (a fixed set of named `'static` entries) is a string that `refers_to` the catalog. With `runtime` every Rust type can be described; the space game's 2797 component types (738
 tags, 2059 with data) all are, 56 of them with a `runtime` part.
 
 `sync.Described` holds a pointer, so it means something only in the process that set it; it is never part of a
 snapshot, and a script world never has it.
+
+### Logical types
+
+A layout has two layers. The **physical** layer (the primitives, struct, enum, bitmask, array, vector, option,
+union, map, runtime) alone decides the encoding and the Flecs meta. The **logical** layer refines a physical layout
+with rules a value must also meet; it never changes the bytes. `NonZero<u32>` is physically `u32` and is saved as a
+bare integer.
+
+    {"logical": path | null, "of": L, "rules": {rule: arg, ...}}
+
+`logical` is the logical type's name (null for rules declared on one member), `of` the physical layout (never itself
+logical: nested refinements fold into one node), and `rules` a map, its keys sorted as DAG-CBOR sorts them. A node
+with no name and no rules is not written: the member's layout is `of`, so a layout with no refinement is
+byte-identical to what it was before logical types. The rules, each in one normal form (a reader refuses any other):
+
+| rule | arg | on | a value must |
+|---|---|---|---|
+| `range` | `[min \| null, max \| null]`, integers for an integer `of`, floats for a float | numbers | lie within the bounds, inclusive |
+| `finite` | null | floats | be finite (every saved float already is; the rule says so to readers and tools) |
+| `unit` | the unit entity's path | numbers | nothing: it names the unit (`flecs.units.Length.Meters`) |
+| `refers_to` | `[catalog path, [name, ...]]`, names sorted | strings | be one of the names |
+| `validated` | `[check path, ...]`, sorted | any | pass each check (a function the host registered) |
+
+A range bound is clipped to the physical type's range and left out (null) when it says nothing there; a range with
+no bound is dropped. Bounds are kept as f64 in the world (`sync.Range`), so integer bounds past 2^53 lose precision.
+
+Where they come from:
+
+- **Flecs Script and Flecs data.** A logical type is an entity that is `(IsA, <primitive>)` and carries rule
+  components: `Percent { (IsA, flecs.meta.u8)  sync.Range: {max: 100} }`. A struct member entity takes rules by being
+  `(IsA, Percent)` or by carrying them itself (`Ratio { den { sync.Range: {min: 1} } }`); its own rules and those of
+  every type it is (IsA) of merge (ranges intersect, units must agree, checks union; the nearest base's path is the
+  name). A type entity's own rules wrap its whole layout. The vocabulary is in the sync module: `Range`, `Finite`,
+  `(Unit, u)`, `(RefersTo, catalog)` with `Catalog` on the catalog (its children's names are the names),
+  `(Validated, check)` with `Check` (the function pointer) on the check entity under `sync.checks`.
+- **Described types.** The derive writes the node; registering the type makes the Flecs data the same rules would
+  be: each named logical type under `sync.types` (IsA its primitive, with its rule components), each catalog with a
+  child per name, each check entity, and on each member entity `(IsA, logical type)` or its own rules. The member's
+  Flecs meta stays the physical type, with `EcsMemberRanges` and the `EcsMember` unit set from the rules, so REST and
+  the inspector show them.
+
+Enforcement: a save checks every value against its rules and refuses the first that breaks one, naming the member
+path (`member den: 0 is below the minimum 1 (NonZero<u32>)`); a restore and `World::set` (and a host's set) check
+the same, plus the `validated` checks, before anything is written, and never clamp or substitute. A value written
+past a rule by Flecs Script or a REST write lands in the world (Flecs cannot refuse it) and is refused by the next
+save. Checks run where a world is: the readers (TS, `check::value`) check range and catalog only.
+
+A built-in check `sync.checks.NonZero` refuses zero; a signed `NonZero<T>` uses it (a range cannot say "not zero"),
+an unsigned one is `range [1, null]`.
+
+### Compatibility
+
+`compare(old, new)` classifies the change between two layout records of one base:
+
+- **Safe**: every old value is a new value as it is: a range loosened or dropped, `finite` added or dropped, a unit
+  added or dropped, a catalog name added, a check dropped, an enum or bitmask constant added or renumbered, a union
+  variant added, a merge rule, member rule slot, name, member order or permission changed.
+- **NeedsCheck**: old values read as they are but must pass the new rules: a range added or tightened, a check added,
+  `refers_to` added.
+- **NeedsMigration**: old values do not read as new ones: a physical change (a primitive, a kind, a member or variant
+  added or removed, a variant's payload added or removed, an array's count), a unit changed, a catalog changed or a
+  name removed, a constant removed, the sync mode changed.
+
+The verdict is the worst change, with every change listed by member path (`a.b`, `x[]`, `m{key}`).
+`Migrations::compatible(old, new)` adds a by-name edge for a Safe or NeedsCheck change (the restore through it checks
+every value against the new rules) and refuses a NeedsMigration one, naming its changes. A host compares its saved
+records with its live ones this way instead of comparing hashes.
 
 ## Entity record
 
@@ -465,9 +537,19 @@ The Rust API a host calls (crate `flecs-snapshot`, feature `host`; `crates/flecs
         pub fn by_name(&mut self, from: Ipld, to: Ipld, renamed_from: &[(&str, &str)]) -> Result<(), String>;
         pub fn custom(&mut self, from: Ipld, to: Ipld, f: Box<dyn Fn(&Ipld) -> Result<Ipld, String>>) -> Result<(), String>;
         pub fn convert(&self, from: &[u8; 8], to: &[u8; 8], v: &Ipld, report: &mut Report) -> Result<Ipld, String>;
+        /// A by-name edge for a Safe or NeedsCheck change; an error naming the changes otherwise.
+        pub fn compatible(&mut self, from: Ipld, to: Ipld) -> Result<Verdict, String>;
         pub fn to_cbor(&self) -> Vec<u8>;
         pub fn from_cbor(b: &[u8]) -> Result<Migrations, String>;
     }
+
+    // Logical types (SPEC.md, "Logical types", "Compatibility").
+    pub enum Compat { Safe, NeedsCheck, NeedsMigration }
+    pub struct Verdict { pub compat: Compat, pub changes: Vec<compat::Change> } // Change { path, compat, what }
+    pub fn compare(old: &Ipld, new: &Ipld) -> Result<Verdict, String>;
+    pub type CheckFn = fn(&Ipld) -> Result<(), String>;
+    /// Makes (or finds) the check entity at `path` (by convention under `sync.checks`) and sets its function.
+    pub unsafe fn register_check(world: *mut ecs_world_t, path: &str, f: CheckFn) -> Result<ecs_entity_t, String>;
 
 The crate `flecs-describe` (features `flecs_ecs`, `glam`, `half`, `bitflags`):
 
@@ -484,6 +566,12 @@ The crate `flecs-describe` (features `flecs_ecs`, `glam`, `half`, `bitflags`):
     /// Makes a component at `path` with Rust's lifecycle hooks, then registers `T` on it.
     pub unsafe fn component<T: Describe + Default + Clone>(world: *mut ecs_world_t, path: &str)
         -> Result<ecs_entity_t, String>;
+    /// A fixed set of named `'static` entries; `&'static T` is saved as the entry's name.
+    pub trait Catalog: 'static {
+        const CATALOG: &'static str;
+        fn entries() -> &'static [&'static Self];
+        fn name(&self) -> &str;
+    }
 
 Every error is a `String` naming the entity (by id), the part and the member path. Nothing panics or aborts on bad
 input: the host's Flecs build may not have soft asserts, so the library checks each argument before calling Flecs.
@@ -498,6 +586,8 @@ on the lookup path, so scripts write `(Merge, Text)` without the prefix. It hold
 - the `Sync` relationship and its modes;
 - the `Bytes` and `Blob` types;
 - the `Described` component (a host-process pointer to a type's description; "Described types");
+- the logical vocabulary ("Logical types"): `Range`, `Finite`, `Unit`, `RefersTo`, `Catalog`, `Validated`, `Check`,
+  the scope `checks` (with the built-in `NonZero`) and the scope `types` (the logical types described types make);
 - the reserved permission and validation vocabulary below.
 
 ## Merging

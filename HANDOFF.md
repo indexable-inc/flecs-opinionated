@@ -1,5 +1,44 @@
 # Handoff
 
+## Logical types (lane FLECS-LOGICAL, 2026-10-26)
+
+**State:** on main. Described and script types split into a physical layout (decides encoding and Flecs meta) and
+logical refinements (SPEC.md "Logical types", "Compatibility"). `uv run build.py --test`, host-check, rustfmt and the
+four clippy runs passed on dev-aws-8.
+
+- Format: new layout kind `{"logical": name|null, "of": L, "rules": {...}}` (rules `range`, `finite`, `unit`,
+  `refers_to`, `validated`), additive within VERSION 2. An unrefined layout is byte-identical, so its hash is
+  unchanged. `NonZero<T>` is now the logical type over `T`, so its value is the bare integer. Its old shape was the
+  game's struct `{"0": n}`, so hashes of types that hold one change.
+- Code:
+  - `crates/flecs-snapshot/src/logical.rs`: the node, the rules, checks and their Flecs data.
+  - `compat.rs`: `compare` returns `Safe`, `NeedsCheck` or `NeedsMigration`.
+  - `migrate.rs`: `Migrations::compatible`.
+  - `walk.rs`: script member and type rules through IsA.
+  - `schema.rs`: the vocabulary.
+  - `flecs-describe`: `catalog.rs` (`Catalog`), the NonZero impls, `__private::{refine, CHECKS}`.
+  - The derive's `range`, `unit`, `finite`, `validate` and `logical`.
+  - `js/src/index.ts`: the reader accepts the kind and checks range and catalog.
+- Enforcement: save, restore and `set` refuse with the member path and never clamp. `validated` checks run only
+  where a world is: on restore and set, not on save, and not in the readers.
+- Game changes 1-11 from its SOURCE.md are upstream: the flecs-c build.rs finds `vendor/flecs_ecs_sys` too. One
+  fix on top: a runtime part's `Default` probe ran inside a generic fn, so it always said "no Default". The derive
+  now expands it at the field's type. The game's vendored copy has this bug.
+- Tests:
+  - flecs-snapshot `script_member_rules`, `compat_table`;
+  - flecs-describe `tests/logical.rs`;
+  - host-check `restore_refuses_a_broken_rule`;
+  - bun "logical types".
+- Open:
+  - "Entity reference saved as a stable id, restored as a relation": the `entity` primitive already saves a stable
+    id; a relation-valued member was not built.
+  - REST and Script writes cannot be intercepted (Flecs's `on_validate` hook only suppresses OnSet); they are
+    refused at the next save.
+  - A `Counter` merge on a ranged member can leave the range.
+  - u64 range bounds past 2^53 lose precision (`sync.Range` is f64).
+  - A generic derived type's `validate` runs only in `from_value`, so no check entity is made for it.
+- dev-aws-8: `~/flecslog` deleted, ledger row RELEASED.
+
 **State:** the host-world work (lane FLECS-OPINIONATED, 2026-10-25) is on main: `Host` (save, incremental blocks,
 restore, live migration) on a host's own Flecs world, described types (`flecs-describe`, `#[derive(Describe)]`), and
 `host-check/`, a host on flecs_ecs that tests both. `uv run build.py --test` passed on dev-aws-8 (cargo wasm and

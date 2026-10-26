@@ -10,7 +10,7 @@ use crate::meta::{self, Meta};
 use crate::{Describe, Ipld, R};
 
 /// A path segment as flecs-snapshot writes it: `\` and `.` escaped with `\`, and a leading `#` too.
-fn escape(name: &str) -> String {
+pub(crate) fn escape(name: &str) -> String {
     let e = name.replace('\\', "\\\\").replace('.', "\\.");
     if e.starts_with('#') {
         format!("\\{e}")
@@ -55,6 +55,11 @@ pub unsafe fn path_of(world: *const ecs_world_t, e: ecs_entity_t) -> R<String> {
 /// Replaces the top-level type name of a layout (struct, union, enum, bitmask, runtime) with `path`.
 fn rename_top(l: &mut Ipld, path: &str) {
     if let Ipld::Map(m) = l {
+        if m.contains_key("logical")
+            && let Some(of) = m.get_mut("of")
+        {
+            return rename_top(of, path);
+        }
         for k in ["struct", "union", "enum", "bitmask", "runtime"] {
             if let Some(v) = m.get_mut(k) {
                 *v = Ipld::String(path.to_string());
@@ -85,14 +90,16 @@ unsafe fn write_fn<T: Describe>(v: &Ipld, ptr: *mut u8, ids: &mut dyn Resolve) -
 ///   unit enums with an integer `#[repr]`, 32-bit bitflags, structs of those): a Flecs struct (array, enum,
 ///   bitmask) with Rust's offsets, its member types made under `flecs.rust.described`. Zero-sized members hold no
 ///   bytes and are left out;
-/// - otherwise an opaque type whose serialize callback writes the value `T::read` gives, so Flecs's REST and JSON
+/// - when only some members are expressible, a partial struct of those (`Flecs::partial`), as hand-declared
+///   partial meta was;
+/// - otherwise (no member expressible) an opaque type whose serialize callback writes the value `T::read` gives, so Flecs's REST and JSON
 ///   show it. Writing it through Flecs (a script, the meta cursor, REST) is not supported: it has no assign callbacks.
 ///
 /// When the type already has Flecs meta (flecs_ecs's `#[flecs(meta)]`, a script's struct), nothing is registered:
 /// its member names, order, offsets, primitive kinds, enum and bitmask constants and array counts are checked against
 /// `T` and the first mismatch is the error. A part either side holds as opaque is not looked into.
 ///
-/// A zero-sized `T` (a tag) is only described.
+/// A zero-sized `T` (a tag) is only described, whatever size Flecs gave it (flecs_ecs's modules are size 1).
 ///
 /// # Safety
 ///
@@ -112,7 +119,9 @@ pub unsafe fn register<T: Describe>(world: *mut ecs_world_t, component: ecs_enti
     let (size, align) = (core::mem::size_of::<T>(), core::mem::align_of::<T>());
     match meta::component_size(world, component) {
         Some((s, a)) if s == size && (s == 0 || a == align) => {}
-        None if size == 0 => {}
+        // a zero-sized Rust type is a tag whatever Flecs gave it (flecs_ecs registers a module, and some
+        // unit structs, with size 1 and alignment 1, which hold no Rust value): described as a tag, no meta.
+        _ if size == 0 => {}
         Some((s, a)) => {
             return Err(format!(
                 "{}: Flecs has size {s} and alignment {a}, Rust {size} and {align}",
@@ -120,6 +129,12 @@ pub unsafe fn register<T: Describe>(world: *mut ecs_world_t, component: ecs_enti
             ));
         }
         None => return Err(format!("{}: not a Flecs component", what())),
+    }
+    // Every derived `validate` check first, so the layout's `validated` rules find theirs.
+    for c in crate::__private::CHECKS.iter() {
+        // SAFETY: the caller's contract.
+        unsafe { flecs_snapshot::logical::register_check(world, &(c.path)(), c.check) }
+            .map_err(|e| format!("{}: registering a check: {e}", what()))?;
     }
     let flecs = T::flecs();
     let mut layout = T::layout();
@@ -134,10 +149,15 @@ pub unsafe fn register<T: Describe>(world: *mut ecs_world_t, component: ecs_enti
         } else {
             // SAFETY: the caller's contract.
             let mut m = unsafe { Meta::new(world) }.map_err(|e| format!("{}: {e}", what()))?;
-            if !m
-                .init_component(component, &flecs)
-                .map_err(|e| format!("{}: {e}", what()))?
-            {
+            // the members Flecs can hold (all of an expressible type, a partial struct otherwise), so REST
+            // and scripts read and write them; opaque only when none can be held.
+            let held = match flecs.partial() {
+                Some(p) => m
+                    .init_component(component, &p)
+                    .map_err(|e| format!("{}: {e}", what()))?,
+                None => false,
+            };
+            if !held {
                 m.init_opaque::<T>(component, &layout)
                     .map_err(|e| format!("{}: {e}", what()))?;
             }
@@ -308,4 +328,57 @@ pub unsafe fn component<T: Describe + Default + Clone>(
     // SAFETY: the caller's contract; `e`'s values are T, made and dropped by the hooks above.
     unsafe { register::<T>(world, e) }?;
     Ok(e)
+}
+
+/// What [`describe_all`] did.
+#[derive(Debug, Default)]
+pub struct Swept {
+    /// Components described by this call.
+    pub described: usize,
+    /// Components that already had a description (left as they were).
+    pub kept: usize,
+    /// One line per component that could not be described: its Rust type and why.
+    pub errors: Vec<String>,
+}
+
+/// Describes every component `world` registered whose Rust type derives `Describe` (the derive's
+/// `__private::DESCRIBED` registry; generic types are not in it), found by its Rust symbol as flecs_ecs registers it
+/// (`core::any::type_name`). A component already described is left alone (a description is leaked, so describing it
+/// again on every call would grow the process). A derived type the world never registered as a component is skipped:
+/// it is described as a member of the components that hold it.
+///
+/// Registry entries are per linked image: a type in a hot-reloaded dylib is in that dylib's registry, not the
+/// executable's, so call this from the image that registers the component, or register it directly.
+///
+/// # Safety
+///
+/// `world` is a live world not used by another thread during the call; each component registered under a derived
+/// type's symbol holds values of that type (flecs_ecs's registration guarantees it).
+pub unsafe fn describe_all(world: *mut ecs_world_t) -> Swept {
+    let mut out = Swept::default();
+    for entry in crate::__private::DESCRIBED.iter() {
+        let symbol = (entry.symbol)();
+        let Ok(c) = CString::new(symbol) else {
+            out.errors
+                .push(format!("{symbol}: the symbol holds a NUL byte"));
+            continue;
+        };
+        // SAFETY: the caller's contract; a plain lookup with a NUL-terminated symbol.
+        let component = unsafe { sys::ecs_lookup_symbol(world, c.as_ptr(), false, false) };
+        if component == 0 {
+            continue;
+        }
+        // SAFETY: as above.
+        if unsafe { flecs_snapshot::described::described(world, component) }.is_some() {
+            out.kept += 1;
+            continue;
+        }
+        // SAFETY: the caller's contract: the component of this symbol holds values of the entry's type.
+        match unsafe { (entry.register)(world, component) } {
+            Ok(()) => out.described += 1,
+            Err(e) => out.errors.push(format!("{symbol}: {e}")),
+        }
+    }
+    out.errors.sort();
+    out
 }

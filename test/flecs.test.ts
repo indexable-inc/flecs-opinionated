@@ -421,6 +421,35 @@ describe("described layouts", () => {
   });
 });
 
+describe("logical types", () => {
+  const ruled = [
+    "struct Ratio {\n  num = u32\n  den = u32\n}",
+    "Percent {\n  (IsA, flecs.meta.u8)\n  sync.Range: {max: 100}\n}",
+    "struct Gauge {\n  level = u8\n}",
+    "Ratio {\n  den {\n    sync.Range: {min: 1}\n  }\n}",
+    "Gauge {\n  level {\n    (IsA, Percent)\n  }\n}",
+    "r {\n  Ratio: {num: 1, den: 2}\n  Gauge: {level: 50}\n}",
+    "bad {\n  Gauge: {level: 101}\n}",
+  ].join("\n");
+
+  test("refined members are logical layouts the reader checks", () => {
+    using w = world(ruled);
+    const doc = w.snapshot(["r"]);
+    const gauge = Object.values(doc.layouts).find((l) => l.base === "Gauge")!;
+    expect(gauge.layout).toEqual({
+      struct: "Gauge",
+      members: [["level", { logical: "Percent", of: "u8", rules: { range: [null, 100] } }, "KeepBoth"]],
+    });
+    expect(() => checkDocument(doc)).not.toThrow();
+    // The wasm world refuses a value past a rule; the reader does too, given one.
+    expect(() => w.snapshot(["bad"])).toThrow(/member level: 101 is above the maximum 100 \(Percent\)/);
+    const forged = structuredClone(doc);
+    const r = forged.entities.find((e) => e.path === "r")!;
+    (r.components["Ratio"]!.value as { den: number }).den = 0;
+    expect(() => checkDocument(forged)).toThrow(/member den: 0 is below the minimum 1/);
+  });
+});
+
 describe("mst", () => {
   const enc = new TextEncoder();
 

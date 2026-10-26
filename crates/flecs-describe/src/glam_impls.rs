@@ -1,5 +1,8 @@
-//! glam's vectors, quaternions, matrices and affine transforms as structs named `glam.<Type>` with their fields as
-//! members (`glam.Vec3 {x, y, z}`, `glam.Mat3 {x_axis, y_axis, z_axis}`, `glam.Affine3A {matrix3, translation}`).
+//! glam's vectors and quaternions as arrays of their components (`glam.Vec3` is `[f32; 3]`, `glam.Quat` is
+//! `[f32; 4]` x, y, z, w; what Flecs Script and the REST API write, `{"color": [0.6, 0.6, 0.65]}`), in the layout, the
+//! value and the Flecs meta (an inline array member). Matrices and affine transforms are structs named
+//! `glam.<Type>` with their fields as members (`glam.Mat3 {x_axis, y_axis, z_axis}`, each an array). `Vec3A` (three
+//! floats in 16 bytes) and the `BVec` masks stay structs (`{x, y, z}`): an array of three would not be their size.
 //!
 //! The SIMD types (`Vec3A`, `Vec4`, `Quat`, `Mat2`, `Mat3A`, `Mat4`, `Affine3A` on targets with SIMD) reach their
 //! fields through `Deref`, so member offsets are measured on a value rather than taken with `offset_of!`; a SIMD
@@ -7,6 +10,64 @@
 //! with no stable memory layout and are not described.
 
 use crate::__private::{get, offset_in, struct_layout, struct_value, take_struct};
+
+/// a glam vector or quaternion as `[$e; $n]` (its `to_array` and `from_array`).
+macro_rules! glam_array {
+    ($($t:ident: $e:ty, $n:literal;)*) => {$(
+        impl Describe for glam::$t {
+            fn type_name() -> String {
+                concat!("glam.", stringify!($t)).into()
+            }
+            fn layout() -> Ipld {
+                <[$e; $n] as Describe>::layout()
+            }
+            fn read(&self, refs: &mut dyn Refs) -> R<Ipld> {
+                <[$e; $n] as Describe>::read(&self.to_array(), refs)
+            }
+            fn from_value(v: &Ipld, ids: &mut dyn Resolve) -> R<Self> {
+                Ok(glam::$t::from_array(<[$e; $n] as Describe>::from_value(v, ids)?))
+            }
+            fn flecs() -> Flecs {
+                Flecs::Array {
+                    name: Self::type_name(),
+                    elem: Box::new(<$e as Describe>::flecs()),
+                    count: $n,
+                    size: core::mem::size_of::<Self>(),
+                    align: core::mem::align_of::<Self>(),
+                }
+            }
+        }
+    )*};
+}
+
+glam_array! {
+    Vec2: f32, 2;
+    Vec3: f32, 3;
+    Vec4: f32, 4;
+    DVec2: f64, 2;
+    DVec3: f64, 3;
+    DVec4: f64, 4;
+    IVec2: i32, 2;
+    IVec3: i32, 3;
+    IVec4: i32, 4;
+    UVec2: u32, 2;
+    UVec3: u32, 3;
+    UVec4: u32, 4;
+    I16Vec2: i16, 2;
+    I16Vec3: i16, 3;
+    I16Vec4: i16, 4;
+    U16Vec2: u16, 2;
+    U16Vec3: u16, 3;
+    U16Vec4: u16, 4;
+    I64Vec2: i64, 2;
+    I64Vec3: i64, 3;
+    I64Vec4: i64, 4;
+    U64Vec2: u64, 2;
+    U64Vec3: u64, 3;
+    U64Vec4: u64, 4;
+    Quat: f32, 4;
+    DQuat: f64, 4;
+}
 use crate::{Describe, Flecs, FlecsMember, FlecsStruct, Ipld, R, Refs, Resolve, member_err};
 
 macro_rules! glam_struct {
@@ -55,36 +116,10 @@ macro_rules! glam_struct {
 }
 
 glam_struct! {
-    Vec2 { x: f32, y: f32 }
-    Vec3 { x: f32, y: f32, z: f32 }
     Vec3A { x: f32, y: f32, z: f32 }
-    Vec4 { x: f32, y: f32, z: f32, w: f32 }
-    DVec2 { x: f64, y: f64 }
-    DVec3 { x: f64, y: f64, z: f64 }
-    DVec4 { x: f64, y: f64, z: f64, w: f64 }
-    IVec2 { x: i32, y: i32 }
-    IVec3 { x: i32, y: i32, z: i32 }
-    IVec4 { x: i32, y: i32, z: i32, w: i32 }
-    UVec2 { x: u32, y: u32 }
-    UVec3 { x: u32, y: u32, z: u32 }
-    UVec4 { x: u32, y: u32, z: u32, w: u32 }
-    I16Vec2 { x: i16, y: i16 }
-    I16Vec3 { x: i16, y: i16, z: i16 }
-    I16Vec4 { x: i16, y: i16, z: i16, w: i16 }
-    U16Vec2 { x: u16, y: u16 }
-    U16Vec3 { x: u16, y: u16, z: u16 }
-    U16Vec4 { x: u16, y: u16, z: u16, w: u16 }
-    I64Vec2 { x: i64, y: i64 }
-    I64Vec3 { x: i64, y: i64, z: i64 }
-    I64Vec4 { x: i64, y: i64, z: i64, w: i64 }
-    U64Vec2 { x: u64, y: u64 }
-    U64Vec3 { x: u64, y: u64, z: u64 }
-    U64Vec4 { x: u64, y: u64, z: u64, w: u64 }
     BVec2 { x: bool, y: bool }
     BVec3 { x: bool, y: bool, z: bool }
     BVec4 { x: bool, y: bool, z: bool, w: bool }
-    Quat { x: f32, y: f32, z: f32, w: f32 }
-    DQuat { x: f64, y: f64, z: f64, w: f64 }
     Mat2 { x_axis: glam::Vec2, y_axis: glam::Vec2 }
     Mat3 { x_axis: glam::Vec3, y_axis: glam::Vec3, z_axis: glam::Vec3 }
     Mat3A { x_axis: glam::Vec3A, y_axis: glam::Vec3A, z_axis: glam::Vec3A }

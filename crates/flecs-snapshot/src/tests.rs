@@ -442,3 +442,181 @@ fn merge_states() {
     assert_eq!(m, counter(&[(1, 3), (2, 4)]));
     assert!(merge_state(Rule::LastWriter, &reg(1, 10), &counter(&[])).is_err());
 }
+
+/// The layout record of the type at `base` in a document.
+fn record<'a>(doc: &'a Ipld, base: &str) -> &'a Ipld {
+    let Ipld::Map(ls) = field(doc, "layouts") else {
+        panic!("layouts is not a map")
+    };
+    ls.values()
+        .find(|r| field(r, "base") == &s(base))
+        .unwrap_or_else(|| panic!("no layout of {base}"))
+}
+
+fn member<'a>(rec: &'a Ipld, name: &str) -> &'a Ipld {
+    let Ipld::List(ms) = field(field(rec, "layout"), "members") else {
+        panic!("not a struct")
+    };
+    ms.iter()
+        .find_map(|m| match m {
+            Ipld::List(m) if m[0] == s(name) => Some(&m[1]),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no member {name}"))
+}
+
+/// Ratio's `den` has its own range; Gauge's `level` is a `Percent`, a logical type over u8.
+const RULED: &str = "struct Ratio {\n  num = u32\n  den = u32\n}\nPercent {\n  (IsA, flecs.meta.u8)\n  sync.Range: {max: 100}\n}\nstruct Gauge {\n  level = u8\n}\nRatio {\n  den {\n    sync.Range: {min: 1}\n  }\n}\nGauge {\n  level {\n    (IsA, Percent)\n  }\n}\n";
+
+#[test]
+fn script_member_rules() {
+    let mut w = world(&format!(
+        "{RULED}r {{\n  Ratio: {{num: 1, den: 2}}\n  Gauge: {{level: 50}}\n}}\nbad {{\n  Ratio: {{num: 1, den: 0}}\n}}\n"
+    ));
+    let doc = w.document(&["r"]).unwrap();
+    let rule = |k: &str, v: Ipld| Ipld::Map([(k.to_string(), v)].into());
+    let logical = |name: Ipld, of: &str, rules: Ipld| {
+        Ipld::Map(
+            [
+                ("logical".to_string(), name),
+                ("of".to_string(), s(of)),
+                ("rules".to_string(), rules),
+            ]
+            .into(),
+        )
+    };
+    assert_eq!(
+        member(record(&doc, "Ratio"), "den"),
+        &logical(
+            Ipld::Null,
+            "u32",
+            rule("range", Ipld::List(vec![Ipld::Integer(1), Ipld::Null]))
+        )
+    );
+    assert_eq!(member(record(&doc, "Ratio"), "num"), &s("u32"));
+    assert_eq!(
+        member(record(&doc, "Gauge"), "level"),
+        &logical(
+            s("Percent"),
+            "u8",
+            rule("range", Ipld::List(vec![Ipld::Null, Ipld::Integer(100)]))
+        )
+    );
+
+    // A value Flecs Script wrote past a rule is refused by the save, with the member's path; never clamped.
+    let e = w.document(&["bad"]).unwrap_err();
+    assert!(e.contains("member den: 0 is below the minimum 1"), "{e}");
+    // A write through `set` is checked before it lands.
+    let ratio = |den| {
+        Ipld::Map(
+            [
+                ("num".to_string(), Ipld::Integer(1)),
+                ("den".to_string(), Ipld::Integer(den)),
+            ]
+            .into(),
+        )
+    };
+    let e = w.set("r", "Ratio", &ratio(0)).unwrap_err();
+    assert!(e.contains("member den: 0 is below the minimum 1"), "{e}");
+    let level = Ipld::Map([("level".to_string(), Ipld::Integer(101))].into());
+    let e = w.set("r", "Gauge", &level).unwrap_err();
+    assert!(e.contains("101 is above the maximum 100 (Percent)"), "{e}");
+    w.set("r", "Ratio", &ratio(3)).unwrap();
+}
+
+/// The compatibility classifier's table (SPEC.md, "Compatibility"): each row an old and a new declaration of `T`.
+#[test]
+fn compat_table() {
+    use crate::{Compat, compare};
+    const BASE: &str = "Meters {}\nFeet {}\n";
+    let rec = |decl: &str, value: &str| {
+        let w = world(&format!("{BASE}{decl}\nt {{\n  T: {{{value}}}\n}}\n"));
+        record(&w.document(&["t"]).unwrap(), "T").clone()
+    };
+    let with = |ty: &str, annot: &str| {
+        format!("struct T {{\n  v = {ty}\n}}\nT {{\n  v {{\n{annot}\n  }}\n}}")
+    };
+    let n = |ty: &str, annot: &str| (with(ty, annot), "v: 5".to_string());
+    let cat = |names: &str| {
+        (
+            format!(
+                "Colors {{\n  sync.Catalog\n  {names}\n}}\n{}",
+                with("string", "(sync.RefersTo, Colors)")
+            ),
+            "v: \"red\"".to_string(),
+        )
+    };
+    /// A declaration of `T` and a value of it.
+    type Decl = (String, String);
+    let rows: Vec<(Decl, Decl, Compat)> = vec![
+        // Nothing changed.
+        (n("u32", ""), n("u32", ""), Compat::Safe),
+        // Range: added or tightened needs a check, loosened or dropped is safe.
+        (
+            n("u32", ""),
+            n("u32", "sync.Range: {min: 1}"),
+            Compat::NeedsCheck,
+        ),
+        (
+            n("u32", "sync.Range: {max: 50}"),
+            n("u32", "sync.Range: {max: 10}"),
+            Compat::NeedsCheck,
+        ),
+        (
+            n("u32", "sync.Range: {max: 10}"),
+            n("u32", "sync.Range: {max: 50}"),
+            Compat::Safe,
+        ),
+        (n("u32", "sync.Range: {min: 1}"), n("u32", ""), Compat::Safe),
+        // Unit: added is safe, changed needs a migration.
+        (n("f32", ""), n("f32", "(sync.Unit, Meters)"), Compat::Safe),
+        (
+            n("f32", "(sync.Unit, Meters)"),
+            n("f32", "(sync.Unit, Feet)"),
+            Compat::NeedsMigration,
+        ),
+        // A physical change needs a migration.
+        (n("u32", ""), n("u64", ""), Compat::NeedsMigration),
+        (
+            n("u32", ""),
+            (
+                "struct T {\n  v = u32\n  w = u32\n}".into(),
+                "v: 5, w: 1".into(),
+            ),
+            Compat::NeedsMigration,
+        ),
+        // Catalog: a name added is safe, one removed needs a migration, refers_to added needs a check.
+        (
+            cat("red {}\n  green {}"),
+            cat("red {}\n  green {}\n  blue {}"),
+            Compat::Safe,
+        ),
+        (
+            cat("red {}\n  green {}"),
+            cat("red {}"),
+            Compat::NeedsMigration,
+        ),
+        (
+            (with("string", ""), "v: \"red\"".into()),
+            cat("red {}"),
+            Compat::NeedsCheck,
+        ),
+    ];
+    for (i, ((od, ov), (nd, nv), want)) in rows.iter().enumerate() {
+        let v = compare(&rec(od, ov), &rec(nd, nv)).unwrap();
+        assert_eq!(v.compat, *want, "row {i}: {:?}", v.changes);
+    }
+
+    // A migration registry takes Safe and NeedsCheck changes as by-name edges and refuses the rest, naming them.
+    let mut m = crate::Migrations::new();
+    let (u32_, u64_, ranged) = (n("u32", ""), n("u64", ""), n("u32", "sync.Range: {min: 1}"));
+    let e = m
+        .compatible(rec(&u32_.0, &u32_.1), rec(&u64_.0, &u64_.1))
+        .unwrap_err();
+    assert!(e.contains("v"), "{e}");
+    let v = m
+        .compatible(rec(&u32_.0, &u32_.1), rec(&ranged.0, &ranged.1))
+        .unwrap();
+    assert_eq!(v.compat, Compat::NeedsCheck);
+    assert!(!m.is_empty());
+}

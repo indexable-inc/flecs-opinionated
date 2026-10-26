@@ -401,3 +401,51 @@ int glue_set_string(char **slot, const char *s, int32_t len) {
     *slot = n;
     return 0;
 }
+
+/* ---- Logical types (crates/flecs-snapshot/src/logical.rs) --------------------------------------------------------- */
+
+/* sync.Range starts unbounded: -DBL_MAX to DBL_MAX (finite, so a snapshot can hold it), so a script sets only the
+ * bound it means. */
+static void glue_range_ctor(void *ptr, int32_t count, const ecs_type_info_t *ti) {
+    (void)ti;
+    double *r = ptr;
+    for (int32_t i = 0; i < count; i++) {
+        r[2 * i] = -__DBL_MAX__;
+        r[2 * i + 1] = __DBL_MAX__;
+    }
+}
+
+int glue_range_hooks(ecs_world_t *world, ecs_entity_t range) {
+    const ecs_type_info_t *ti = ecs_get_type_info(world, range);
+    if (!ti || ti->size != 2 * (ecs_size_t)sizeof(double)) return -1;
+    ecs_type_hooks_t h = ti->hooks;
+    h.ctor = glue_range_ctor;
+    h.flags &= ~((ecs_flags32_t)ECS_TYPE_HOOKS);
+    ecs_set_hooks_id(world, range, &h);
+    return 0;
+}
+
+/* The type of a struct member entity, or 0 when `member` is not one. */
+ecs_entity_t glue_member_type(const ecs_world_t *world, ecs_entity_t member) {
+    const EcsMember *m = ecs_get(world, member, EcsMember);
+    return m ? m->type : 0;
+}
+
+/* Mirrors a member's logical rules into Flecs's reflection: its range as EcsMemberRanges (when has_range) and its unit
+ * as EcsMember.unit (when `unit` is a Flecs unit). Flecs shows both (REST, the explorer) and enforces neither. */
+void glue_member_refine(ecs_world_t *world, ecs_entity_t member, bool has_range, double min, double max,
+                        ecs_entity_t unit) {
+    if (has_range) {
+        EcsMemberRanges *r = ecs_ensure(world, member, EcsMemberRanges);
+        r->value.min = min;
+        r->value.max = max;
+        ecs_modified(world, member, EcsMemberRanges);
+    }
+    if (unit && ecs_has(world, unit, EcsUnit)) {
+        EcsMember *m = ecs_ensure(world, member, EcsMember);
+        if (m->unit != unit) {
+            m->unit = unit;
+            ecs_modified(world, member, EcsMember);
+        }
+    }
+}

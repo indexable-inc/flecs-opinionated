@@ -115,6 +115,38 @@ impl Migrations {
         self.add(from, to, Convert::ByName(renamed))
     }
 
+    /// An edge from `from` to `to` when the change needs no migration (`compat::compare` says `Safe` or
+    /// `NeedsCheck`): values are kept as they are, and a restore along it checks each against the new layout's rules
+    /// and refuses the first that fails. Returns the verdict; a `NeedsMigration` verdict adds nothing and is an error
+    /// listing what changed. Identical records need no edge (nothing is added).
+    pub fn compatible(&mut self, from: Ipld, to: Ipld) -> R<crate::compat::Verdict> {
+        let v = crate::compat::compare(&from, &to)?;
+        if v.compat == crate::compat::Compat::NeedsMigration {
+            let what: Vec<String> = v
+                .changes
+                .iter()
+                .filter(|c| c.compat == crate::compat::Compat::NeedsMigration)
+                .map(|c| {
+                    if c.path.is_empty() {
+                        c.what.clone()
+                    } else {
+                        format!("{}: {}", c.path, c.what)
+                    }
+                })
+                .collect();
+            return Err(format!(
+                "{} -> {} needs a migration: {}",
+                path_of(&from)?,
+                path_of(&to)?,
+                what.join("; ")
+            ));
+        }
+        if hash_of(&from)? != hash_of(&to)? {
+            self.by_name(from, to, &[])?;
+        }
+        Ok(v)
+    }
+
     /// An edge converted by `f`, whose result must fit the new layout.
     pub fn custom(&mut self, from: Ipld, to: Ipld, f: Custom) -> R<()> {
         self.add(from, to, Convert::Custom(f))
@@ -410,6 +442,8 @@ pub fn zero(l: &Ipld) -> R<Ipld> {
             Ipld::List(Vec::new())
         }
         Ipld::Map(m) if m.contains_key("runtime") => Ipld::Null,
+        // The physical zero; a rule that refuses it makes the migration's result refused (no substitute value).
+        Ipld::Map(m) if m.contains_key("logical") => zero(&m["of"])?,
         Ipld::Map(m) if m.contains_key("union") => {
             // The first variant, with its payload's zero.
             let Some(Ipld::List(vs)) = m.get("variants") else {
@@ -435,6 +469,12 @@ impl ByName<'_> {
     /// `v` (of layout `a`) as a value of layout `b`. `at` is the member path so far; `default` is the new type's
     /// default value at this place, when known.
     fn value(&mut self, a: &Ipld, b: &Ipld, v: &Ipld, at: &str, default: Option<&Ipld>) -> R<Ipld> {
+        if a == b {
+            return Ok(v.clone());
+        }
+        // Values convert by their physical layouts; the result is checked against the new rules afterwards
+        // (SPEC.md, "Logical types").
+        let (a, b) = (crate::logical::physical(a), crate::logical::physical(b));
         if a == b {
             return Ok(v.clone());
         }

@@ -53,6 +53,8 @@ impl Rule {
 
     /// Whether the rule can apply to a value of this layout (SPEC.md, "Layouts").
     pub fn check(self, layout: &Ipld) -> Result<(), String> {
+        // A refinement does not change how a value merges (SPEC.md, "Logical types").
+        let layout = crate::logical::physical(layout);
         let prim = match layout {
             Ipld::String(s) => Some(s.as_str()),
             _ => None,

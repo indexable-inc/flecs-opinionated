@@ -250,6 +250,13 @@ unsafe extern "C" {
         result: *mut c_void,
     ) -> c_int;
     pub fn ecs_lookup(world: *const ecs_world_t, path: *const c_char) -> ecs_entity_t;
+    // finds a flecs_ecs component by its Rust symbol (flecs-describe's `describe_all`).
+    pub fn ecs_lookup_symbol(
+        world: *const ecs_world_t,
+        symbol: *const c_char,
+        lookup_as_path: bool,
+        recursive: bool,
+    ) -> ecs_entity_t;
     pub fn ecs_get_name(world: *const ecs_world_t, entity: ecs_entity_t) -> *const c_char;
     pub fn ecs_get_parent(world: *const ecs_world_t, entity: ecs_entity_t) -> ecs_entity_t;
     pub fn ecs_get_type(world: *const ecs_world_t, entity: ecs_entity_t) -> *const ecs_type_t;
@@ -301,6 +308,17 @@ unsafe extern "C" {
     ) -> *mut ecs_meta_cursor_t;
     pub fn glue_cursor_free(c: *mut ecs_meta_cursor_t);
     pub fn glue_set_string(slot: *mut *mut c_char, s: *const c_char, len: i32) -> c_int;
+    // logical types (flecs-snapshot's logical.rs)
+    pub fn glue_range_hooks(world: *mut ecs_world_t, range: ecs_entity_t) -> c_int;
+    pub fn glue_member_type(world: *const ecs_world_t, member: ecs_entity_t) -> ecs_entity_t;
+    pub fn glue_member_refine(
+        world: *mut ecs_world_t,
+        member: ecs_entity_t,
+        has_range: bool,
+        min: f64,
+        max: f64,
+        unit: ecs_entity_t,
+    );
     pub fn ecs_defer_end(world: *mut ecs_world_t) -> bool;
     pub fn ecs_get_table(world: *const ecs_world_t, entity: ecs_entity_t) -> *mut ecs_table_t;
     pub fn ecs_lookup_child(

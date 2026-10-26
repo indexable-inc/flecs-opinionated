@@ -20,12 +20,20 @@ use std::path::PathBuf;
 
 fn main() {
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
-    let flecs = root.join("../../vendor/flecs/distr");
-    assert!(
-        flecs.join("flecs.c").is_file(),
-        "{} not found (vendored: vendor/flecs/SOURCE.md)",
-        flecs.join("flecs.c").display()
-    );
+    // This repo's pin (vendor/flecs/distr), or, when the crate is vendored into a host's tree next to its
+    // flecs_ecs_sys (`<vendor>/flecs-opinionated/crates/flecs-c` beside `<vendor>/flecs_ecs_sys`), the host's own
+    // amalgamation, so a vendored copy needs no edit here.
+    let flecs = ["../../vendor/flecs/distr", "../../../flecs_ecs_sys/src"]
+        .iter()
+        .map(|p| root.join(p))
+        .find(|d| d.join("flecs.h").is_file())
+        .unwrap_or_else(|| {
+            panic!(
+                "flecs.h not found under {} or {} (vendored: vendor/flecs/SOURCE.md)",
+                root.join("../../vendor/flecs/distr").display(),
+                root.join("../../../flecs_ecs_sys/src").display()
+            )
+        });
     let target = env::var("TARGET").expect("TARGET");
     let mut b = cc::Build::new();
     if env::var_os("CARGO_FEATURE_HOST").is_some() {
@@ -52,6 +60,7 @@ fn main() {
         }
         b.compile("flecs_glue");
         println!("cargo:rerun-if-changed={}", root.join("csrc").display());
+        println!("cargo:rerun-if-changed={}", flecs.join("flecs.h").display());
         return;
     }
     b.file(flecs.join("flecs.c"))
@@ -85,12 +94,12 @@ fn main() {
     }
     b.compile("flecs");
     for p in [
-        "../../vendor/flecs/distr/flecs.c",
-        "../../vendor/flecs/distr/flecs.h",
-        "csrc",
-        "wasm-libc",
+        flecs.join("flecs.c"),
+        flecs.join("flecs.h"),
+        root.join("csrc"),
+        root.join("wasm-libc"),
     ] {
-        println!("cargo:rerun-if-changed={}", root.join(p).display());
+        println!("cargo:rerun-if-changed={}", p.display());
     }
     println!("cargo:rerun-if-env-changed=CC_wasm32_unknown_unknown");
     println!("cargo:rerun-if-env-changed=AR_wasm32_unknown_unknown");

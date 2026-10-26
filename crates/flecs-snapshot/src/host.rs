@@ -39,9 +39,37 @@ pub enum Outside {
     ById,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct Encode {
     pub outside: Outside,
+    /// Which named entities outside the selection may be written as `{"path"}` (none: any named one).
+    pub naming: Option<Naming>,
+}
+
+/// The entities a document may name by path: only those the host makes at startup whatever a document holds
+/// (prefabs, components, catalog entities). A path to an entity made at run time would bind nothing, or another
+/// entity, in the next process, so it is refused.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Naming {
+    /// Top-level scopes whose entities, prefabs aside, are made at run time (`people`, `ships`).
+    pub runtime_roots: Vec<String>,
+    /// Scopes, at any depth, whose descendants are made at run time.
+    pub runtime_scopes: Vec<String>,
+}
+
+/// One saved entity's record ([`Host::encode_parts`]): its id, its DAG-CBOR record and the layout records (by type
+/// path) the record uses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    pub id: [u8; 16],
+    pub bytes: Vec<u8>,
+    pub layouts: BTreeMap<String, Ipld>,
+}
+
+/// One saved entity's outcome in [`Host::encode_parts`]: its id when it has one, and its record or why it has none.
+pub struct Encoded {
+    pub id: Option<[u8; 16]>,
+    pub part: R<Part>,
 }
 
 /// How a restore treats saved ids.
@@ -103,7 +131,7 @@ pub struct Host {
 }
 
 /// A path's segments, unescaped (SPEC.md, "Values": `\` escapes `.`, `\` and a leading `#`).
-fn segments(path: &str) -> R<Vec<String>> {
+pub(crate) fn segments(path: &str) -> R<Vec<String>> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut it = path.chars();
@@ -125,7 +153,7 @@ fn segments(path: &str) -> R<Vec<String>> {
 }
 
 /// The entity at a path in a host world, segment by segment by name (a host world's refs never use `#n`).
-fn lookup(w: *const ecs_world_t, path: &str) -> R<ecs_entity_t> {
+pub(crate) fn lookup(w: *const ecs_world_t, path: &str) -> R<ecs_entity_t> {
     let mut e = 0;
     for seg in segments(path)? {
         if seg.starts_with('#') && seg[1..].bytes().all(|b| b.is_ascii_digit()) && seg.len() > 1 {
@@ -565,6 +593,7 @@ impl Host {
             select: self.select,
             saved: saved.iter().copied().collect(),
             outside_by_id: opts.outside == Outside::ById,
+            naming: opts.naming.clone(),
         }
     }
 
@@ -647,6 +676,75 @@ impl Host {
         cbor::list(&mut out, recs.len());
         for (_, b) in recs {
             out.extend_from_slice(&b);
+        }
+        Ok(out)
+    }
+
+    /// Every saved entity's record on its own, as `encode` would write it, with the layout records it uses: an entity
+    /// that cannot be written is its own error (with its id when it has one), not the call's, so a caller can keep
+    /// that entity's last good record and still save the rest. [`Host::assemble`] makes the document.
+    pub fn encode_parts(&self, sel: &Selection, opts: &Encode) -> R<Vec<Encoded>> {
+        let saved = self.saved(sel)?;
+        let mut walk = Walk::new_host(self.w, &self.s, self.cfg(&saved, opts));
+        walk.find_dont_fragment();
+        let mut out = Vec::with_capacity(saved.len());
+        for e in saved {
+            let id = self.s.stable_id(self.w, e);
+            let part = walk
+                .host_record_cbor(e)
+                .map_err(|m| self.err_at(&mut walk, e, m))
+                .and_then(|(id, bytes)| {
+                    Ok(Part {
+                        id,
+                        bytes,
+                        layouts: walk.used_layouts()?,
+                    })
+                });
+            out.push(Encoded { id, part });
+        }
+        Ok(out)
+    }
+
+    /// The host document of `parts` (from [`Host::encode_parts`], this call's or kept from an earlier one): the same
+    /// bytes `encode` writes for those records. Two parts with one id, or two layouts of one type path that differ,
+    /// are refused.
+    pub fn assemble(&self, parts: &[&Part]) -> R<Vec<u8>> {
+        let mut parts = parts.to_vec();
+        parts.sort_by_key(|p| p.id);
+        if let Some(w) = parts.windows(2).find(|w| w[0].id == w[1].id) {
+            return Err(format!("two saved entities have the id {}", hex(&w[0].id)));
+        }
+        let mut layouts: BTreeMap<String, Ipld> = BTreeMap::new();
+        for p in &parts {
+            for (path, rec) in &p.layouts {
+                match layouts.get(path) {
+                    Some(have) if have != rec => {
+                        return Err(format!(
+                            "entity {}: its record uses another layout of {path} than the others' (a record kept \
+                             from before a change of that type)",
+                            hex(&p.id)
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        layouts.insert(path.clone(), rec.clone());
+                    }
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(parts.iter().map(|p| p.bytes.len()).sum::<usize>() + 4096);
+        // DAG-CBOR key order: ids, layouts, version, entities.
+        cbor::map(&mut out, 4);
+        cbor::text(&mut out, "ids");
+        cbor::text(&mut out, &self.ids_path);
+        cbor::text(&mut out, "layouts");
+        cbor::ipld(&mut out, &Ipld::Map(layouts));
+        cbor::text(&mut out, "version");
+        cbor::int(&mut out, VERSION as i128);
+        cbor::text(&mut out, "entities");
+        cbor::list(&mut out, parts.len());
+        for p in parts {
+            out.extend_from_slice(&p.bytes);
         }
         Ok(out)
     }
@@ -972,6 +1070,8 @@ impl Host {
                     let v = self
                         .convert(&mut walk, m, t, v, &mut report)
                         .map_err(|e| format!("{ty}: {e}"))?;
+                    crate::logical::run_checks(w, &v, &types[&t.ty])
+                        .map_err(|e| format!("{ty}: {e}"))?;
                     Ok((t.ty, Some(v)))
                 };
             let val = |(ty, v): (ecs_entity_t, Option<Ipld>), bytes| {
@@ -1164,6 +1264,7 @@ impl Host {
                 select: self.select,
                 saved: made.values().copied().collect(),
                 outside_by_id: true,
+                naming: None,
             },
         );
         // Each entity's parts are added under defer, so Flecs moves it to its final table once.
@@ -1267,6 +1368,7 @@ impl Host {
                     select: self.select,
                     saved: made.values().copied().collect(),
                     outside_by_id: true,
+                    naming: None,
                 },
             );
             vw.find_dont_fragment();

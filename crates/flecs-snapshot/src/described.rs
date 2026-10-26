@@ -62,6 +62,13 @@ pub unsafe fn describe(world: *mut ecs_world_t, ty: ecs_entity_t, d: Described) 
     if !unsafe { sys::ecs_is_alive(world, ty) } {
         return Err(format!("describing #{ty}: not a live entity"));
     }
+    // The logical types, catalogs and checks the layout names, as Flecs data (SPEC.md, "Logical types").
+    // SAFETY: the caller's contract.
+    unsafe {
+        crate::logical::materialise(world, &d.layout)
+            .and_then(|()| crate::logical::annotate_members(world, ty, &d.layout))
+    }
+    .map_err(|e| format!("describing #{ty}: {e}"))?;
     let p: &'static Described = Box::leak(Box::new(d));
     let v: usize = std::ptr::from_ref(p) as usize;
     // SAFETY: sync.Described is `{ptr: uptr}`, one pointer-sized integer.

@@ -199,6 +199,8 @@ pub struct HostCfg {
     pub saved: HashSet<ecs_entity_t>,
     /// Refs to an entity outside `saved` that has an id are written as `{"id"}` instead of refused.
     pub outside_by_id: bool,
+    /// Which named entities may be written as `{"path"}` (`crate::host::Naming`; none: any named one).
+    pub naming: Option<crate::host::Naming>,
 }
 
 pub struct Walk<'s> {
@@ -489,7 +491,49 @@ impl<'s> Walk<'s> {
             }
             return Ok(map([("id", Ipld::Bytes(id.to_vec()))]));
         }
-        Ok(map([("path", text(self.path(e)?))]))
+        let path = self.path(e)?;
+        if let Some(naming) = self.host.as_ref().and_then(|h| h.naming.as_ref()) {
+            self.authored(e, &path, naming)?;
+        }
+        Ok(map([("path", text(path))]))
+    }
+
+    /// Refuses a ref by `path` to `e` unless `e` is made at startup whatever a document holds: no step of its path
+    /// an instance made at run time (an `IsA` that is not a prefab), none under one of `naming`'s run-time scopes,
+    /// its top not a run-time root (unless a step is a prefab), and the path looks `e` up again.
+    fn authored(&self, e: ecs_entity_t, path: &str, naming: &crate::host::Naming) -> R<()> {
+        let refused = |why: String| {
+            Err(format!(
+                "refers to {path}, which has no id and {why}, so its path would not find it in the next \
+                 process: save it too (the select tag), or refer to an authored entity"
+            ))
+        };
+        let mut prefab = false;
+        let mut at = e;
+        let mut top = e;
+        while at != 0 {
+            let name = self.name(at).unwrap_or_default();
+            let is_prefab = self.has(at, self.b.prefab);
+            prefab |= is_prefab;
+            if !is_prefab && self.has(at, sys::pair(self.b.is_a, self.b.wildcard)) {
+                return refused(format!(
+                    "is (or is under) {name}, an instance made at run time"
+                ));
+            }
+            if at != e && naming.runtime_scopes.contains(&name) {
+                return refused(format!("is under {name}, a scope made at run time"));
+            }
+            top = at;
+            at = self.parent(at);
+        }
+        let root = self.name(top).unwrap_or_default();
+        if !prefab && naming.runtime_roots.contains(&root) {
+            return refused(format!("is under {root}, a root made at run time"));
+        }
+        match crate::host::lookup(self.w, path) {
+            Ok(found) if found == e => Ok(()),
+            _ => refused("its path finds another entity or none".to_string()),
+        }
     }
 
     /// The user types marked DontFragment, found once per walk.
@@ -724,6 +768,19 @@ impl<'s> Walk<'s> {
     /// The layout records computed so far, by type path.
     pub fn take_layouts(&mut self) -> BTreeMap<String, Ipld> {
         std::mem::take(&mut self.layouts)
+    }
+
+    /// The layout records the last record used (`used`), by type path, as `take_layouts` will hold them.
+    pub fn used_layouts(&mut self) -> R<BTreeMap<String, Ipld>> {
+        let mut out = BTreeMap::new();
+        let used: Vec<ecs_entity_t> = self.used.iter().copied().collect();
+        for ty in used {
+            let tp = self.path(ty)?;
+            if let Some(rec) = self.layouts.get(&tp) {
+                out.insert(tp, rec.clone());
+            }
+        }
+        Ok(out)
     }
 
     /// The layout record of a type (computing it if this walk has not), as `layouts` will hold it.
@@ -1060,7 +1117,8 @@ impl<'s> Walk<'s> {
         }
         let k = if ty == self.s.bytes {
             WriteKind::Bytes
-        } else if ty == self.s.blob || self.described(ty).is_some() {
+        } else if ty == self.s.blob || self.described(ty).is_some() || self.refined(ty) {
+            // A refined value (SPEC.md, "Logical types") is read whole and checked against its rules.
             WriteKind::Other
         } else {
             match self.get::<sys::EcsType>(ty, self.b.type_).map(|t| t.kind) {
@@ -1168,11 +1226,27 @@ impl<'s> Walk<'s> {
                 Ok(())
             }
             WriteKind::Other => {
-                let v = self.read(ty, ptr)?;
+                let v = self.read_checked(ty, ptr)?;
                 cbor::ipld(out, &v);
                 Ok(())
             }
         }
+    }
+
+    /// Whether `ty`'s layout has a logical node (its values are checked against rules).
+    fn refined(&mut self, ty: ecs_entity_t) -> bool {
+        self.layout(ty).is_ok_and(|l| crate::logical::refined(&l))
+    }
+
+    /// The value at `ptr`, refused when its type's rules refuse it (SPEC.md, "Logical types": a value that breaks
+    /// its rules is never saved, so a restore never meets one written by this library).
+    fn read_checked(&mut self, ty: ecs_entity_t, ptr: *const u8) -> R<Ipld> {
+        let v = self.read(ty, ptr)?;
+        if self.refined(ty) {
+            let l = self.layout(ty)?;
+            crate::check::value(&v, &l, crate::check::Blobs::Links)?;
+        }
+        Ok(v)
     }
 
     /// Reads the DAG-CBOR value at `d`, saved with the layout the live type `ty` has now, over the live value at `dst`;
@@ -1242,6 +1316,7 @@ impl<'s> Walk<'s> {
         let v = d.value(0)?;
         let l = self.layout(ty)?;
         crate::check::value(&v, &l, crate::check::Blobs::Links)?;
+        crate::logical::run_checks(self.w, &v, &l)?;
         if dst.is_null() {
             return Ok(());
         }
@@ -1488,6 +1563,78 @@ impl<'s> Walk<'s> {
     /// rule, or an element of an array or vector): there, struct members carry no rule (null), and rules declared
     /// inside are not used (SPEC.md, "Merge rules").
     fn layout_in(&mut self, ty: ecs_entity_t, covered: bool) -> R<Ipld> {
+        let l = self.physical_layout(ty, covered)?;
+        if self.described(ty).is_some() || ty == self.s.bytes || ty == self.s.blob {
+            return Ok(l);
+        }
+        // A type's own rules (a struct with `(Validated, check)`, say) refine its whole value.
+        let (w, vocab) = (self.w, self.s.vocab);
+        let rules = crate::logical::own_rules(w, &vocab, ty, &mut |t| self.path(t))?;
+        if rules.is_empty() {
+            return Ok(l);
+        }
+        crate::logical::node(None, l, rules).map_err(|e| format!("type {}: {e}", self.tp(ty)))
+    }
+
+    /// The rules entity `e` (a struct member, or a logical type it is an instance of) declares, with the rules of
+    /// every logical type it is `(IsA, ...)` of, applied to `l`, its type's layout. A logical type's physical type
+    /// (its `(IsA, flecs.meta.<primitive>)`) must be `l`'s.
+    fn refine(&mut self, e: ecs_entity_t, l: Ipld) -> R<Ipld> {
+        let (name, rules, phys) = self.entity_rules(e, 0)?;
+        if let Some(p) = phys
+            && crate::logical::physical(&l) != &Ipld::String(p.clone())
+        {
+            let n = name.as_deref().unwrap_or("its logical type");
+            return Err(format!("{n} refines {p}, but the member's type is not {p}"));
+        }
+        if name.is_none() && rules.is_empty() {
+            return Ok(l);
+        }
+        crate::logical::node(name, l, rules)
+    }
+
+    /// (nearest logical type's path, merged rules, physical primitive) of `e`.
+    #[allow(clippy::type_complexity)]
+    fn entity_rules(
+        &mut self,
+        e: ecs_entity_t,
+        depth: usize,
+    ) -> R<(Option<String>, BTreeMap<String, Ipld>, Option<String>)> {
+        if depth > 32 {
+            return Err("logical types nest more than 32 deep (an IsA cycle?)".into());
+        }
+        let (w, vocab) = (self.w, self.s.vocab);
+        let mut rules = crate::logical::own_rules(w, &vocab, e, &mut |t| self.path(t))?;
+        let (mut name, mut phys) = (None, None);
+        let mut bases = Vec::new();
+        for id in self.ids(e) {
+            if sys::is_pair(id) && self.alive(sys::pair_first(id)) == self.b.is_a {
+                bases.push(self.alive(sys::pair_second(id)));
+            }
+        }
+        for base in bases {
+            if let Some(p) = self.get::<sys::EcsPrimitive>(base, self.b.primitive) {
+                let p = primitive_name(p.kind)
+                    .ok_or_else(|| format!("unknown primitive kind {}", p.kind))?;
+                phys = Some(p.to_string());
+                continue;
+            }
+            let (_, br, bp) = self.entity_rules(base, depth + 1)?;
+            let bn = self.path(base)?;
+            rules = crate::logical::merge_rules(&br, &rules).map_err(|e| format!("{bn}: {e}"))?;
+            name = name.or(Some(bn));
+            if let (Some(a), Some(b)) = (&phys, &bp)
+                && a != b
+            {
+                return Err(format!("its logical types refine {a} and {b}"));
+            }
+            phys = phys.or(bp);
+        }
+        Ok((name, rules, phys))
+    }
+
+    /// A type's layout before its own rules.
+    fn physical_layout(&mut self, ty: ecs_entity_t, covered: bool) -> R<Ipld> {
         if ty == self.s.bytes {
             return Ok(text("bytes"));
         }
@@ -1564,6 +1711,13 @@ impl<'s> Walk<'s> {
                     let mut l = self
                         .layout_in(m.type_, inner)
                         .map_err(|e| member_err(&m.name, e))?;
+                    if m.entity != 0 {
+                        // The member's rules, its own and its logical type's (SPEC.md, "Logical types"); on an inline
+                        // array they refine each element.
+                        l = self
+                            .refine(m.entity, l)
+                            .map_err(|e| member_err(&m.name, e))?;
+                    }
                     if m.count > 1 {
                         l = map([("array", l), ("count", Ipld::Integer(m.count as i128))]);
                     }
@@ -1626,7 +1780,7 @@ impl<'s> Walk<'s> {
             return Ok(rec["hash"].clone());
         }
         let l = self.layout(ty)?;
-        let is_struct = matches!(&l, Ipld::Map(x) if x.contains_key("struct"));
+        let is_struct = crate::check::is_struct(&l);
         let merge = if is_struct {
             Ipld::Null
         } else {
@@ -1739,7 +1893,7 @@ impl<'s> Walk<'s> {
             return Err("no value".into());
         }
         let hash = self.layout_record(ty, ephemeral)?;
-        Ok((hash, self.read(ty, ptr)?))
+        Ok((hash, self.read_checked(ty, ptr)?))
     }
 
     fn read(&mut self, ty: ecs_entity_t, ptr: *const u8) -> R<Ipld> {

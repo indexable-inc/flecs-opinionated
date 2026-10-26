@@ -71,6 +71,39 @@ sync {
   }
   // (Authority, actor) on a subtree root: changes there need that actor's countersignature.
   Authority { Exclusive }
+
+  // Logical types (SPEC.md, "Logical types"): rules on a logical type entity (`(IsA, <physical type>)` plus rules) or
+  // on a struct member (which may also be `(IsA, <logical type>)`). A member's own rules and its logical type's
+  // combine: ranges intersect.
+  // Range: {min, max}, inclusive; a bound left out is unbounded (the constructor sets -f64::MAX and f64::MAX).
+  struct Range {
+    min = flecs.meta.f64
+    max = flecs.meta.f64
+  }
+  Range { (OnInstantiate, Inherit) }
+  // Finite: no NaN or infinity (a float).
+  Finite { (OnInstantiate, Inherit) }
+  // (Unit, u): the value's unit (flecs.units.*, or any entity in a world without them).
+  Unit {
+    Exclusive
+    (OnInstantiate, Inherit)
+  }
+  // (RefersTo, catalog): a string that is the name of one of the catalog's children.
+  RefersTo {
+    Exclusive
+    (OnInstantiate, Inherit)
+  }
+  // A catalog: an entity whose children's names are the values a (RefersTo, catalog) string may hold.
+  Catalog {}
+  // (Validated, check): a check that must accept the value before a restore or write takes it.
+  Validated { (OnInstantiate, Inherit) }
+  // On a check entity in a host process: a pointer to its function (register_check). Never in a snapshot.
+  struct Check {
+    ptr = flecs.meta.uptr
+  }
+  // The checks this library and its hosts register, and the logical types described types declare.
+  checks {}
+  types {}
 }
 "#;
 
@@ -84,6 +117,7 @@ pub struct Schema {
     pub bytes: ecs_entity_t,
     pub blob: ecs_entity_t,
     pub described: ecs_entity_t,
+    pub vocab: crate::logical::Vocab,
     rules: Vec<(ecs_entity_t, Rule)>,
     modes: Vec<(ecs_entity_t, Mode)>,
     lookup: Box<[ecs_entity_t; 3]>,
@@ -107,7 +141,14 @@ pub fn ensure(w: *mut ecs_world_t) -> Result<(), String> {
     if unsafe { sys::ecs_lookup(w, c"sync".as_ptr()) } != 0 {
         return Err("the world has a sync entity that is not this library's sync module (no sync.Described)".into());
     }
-    crate::world::script(w, "sync", SCRIPT).map_err(|e| format!("adding the sync module: {e}"))
+    define(w).map_err(|e| format!("adding the sync module: {e}"))
+}
+
+/// Runs the sync module's script in `w` and gives its logical vocabulary what a script cannot (Range's constructor,
+/// the built-in checks).
+pub(crate) fn define(w: *mut ecs_world_t) -> Result<(), String> {
+    crate::world::script(w, "sync", SCRIPT)?;
+    crate::logical::init(w)
 }
 
 impl Schema {
@@ -142,6 +183,7 @@ impl Schema {
             bytes: lookup(w, "sync.Bytes")?,
             blob: lookup(w, "sync.Blob")?,
             described: lookup(w, "sync.Described")?,
+            vocab: crate::logical::Vocab::find(w)?,
             rules,
             modes,
             lookup: Box::new([core, module, 0]),
