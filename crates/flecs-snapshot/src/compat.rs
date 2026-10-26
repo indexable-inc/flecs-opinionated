@@ -338,15 +338,55 @@ impl Cx {
                     self.add(&join(at, n), Compat::Safe, "variant added".into());
                 }
             }
-            "runtime" => self.add(
-                at,
-                Compat::Safe,
-                "the runtime part's name changed (its value is null)".into(),
-            ),
+            "runtime" => self.runtime(at, &x["runtime"], &y["runtime"]),
             _ => self.add(
                 at,
                 Compat::NeedsMigration,
                 "an unknown layout changed".into(),
+            ),
+        }
+    }
+
+    /// Two runtime layouts' bodies that differ. A runtime value is always null, so no change to one touches a saved
+    /// value: each is Safe, and one with the same size and alignment is no change at all. A legacy body (a Rust
+    /// path, written before runtime parts were recorded by size and alignment) is compared by nothing.
+    fn runtime(&mut self, at: &str, a: &Ipld, b: &Ipld) {
+        let body = |r: &Ipld| match r {
+            Ipld::Map(m) => Some((
+                m.get("size").cloned(),
+                m.get("align").cloned(),
+                m.get("implicit").cloned(),
+            )),
+            _ => None,
+        };
+        match (body(a), body(b)) {
+            (Some((sa, aa, ia)), Some((sb, ab, ib))) => {
+                if sa != sb || aa != ab {
+                    self.add(
+                        at,
+                        Compat::Safe,
+                        "the runtime part's size or alignment changed (its value is null; its bytes in memory moved)"
+                            .into(),
+                    );
+                }
+                if ia != ib {
+                    self.add(
+                        at,
+                        Compat::Safe,
+                        "the runtime part became implicit or marked (its value is null)".into(),
+                    );
+                }
+            }
+            (None, None) => self.add(
+                at,
+                Compat::Safe,
+                "the runtime part's legacy path changed (its value is null)".into(),
+            ),
+            _ => self.add(
+                at,
+                Compat::Safe,
+                "the runtime part's legacy path became its size and alignment (its value is null)"
+                    .into(),
             ),
         }
     }
@@ -457,5 +497,108 @@ impl Cx {
         for c in ca.difference(&cb) {
             self.add(at, Compat::Safe, format!("check {c} removed"));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(s: &str) -> Ipld {
+        Ipld::String(s.into())
+    }
+
+    fn runtime(size: i128, align: i128, implicit: bool) -> Ipld {
+        let body = [
+            ("size".to_string(), Ipld::Integer(size)),
+            ("align".to_string(), Ipld::Integer(align)),
+            ("implicit".to_string(), Ipld::Bool(implicit)),
+        ];
+        Ipld::Map(
+            [("runtime".to_string(), Ipld::Map(body.into_iter().collect()))]
+                .into_iter()
+                .collect(),
+        )
+    }
+
+    /// A version-1 record of `W { h: <runtime> }`, hashed.
+    fn record(part: Ipld) -> Ipld {
+        let layout = Ipld::Map(
+            [
+                ("struct".to_string(), text("W")),
+                (
+                    "members".to_string(),
+                    Ipld::List(vec![Ipld::List(vec![text("h"), part, text("LastWriter")])]),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut m: BTreeMap<String, Ipld> = [
+            ("base", text("W")),
+            ("version", Ipld::Integer(1)),
+            ("layout", layout),
+            ("merge", Ipld::Null),
+            ("sync", text("Synced")),
+            ("writable_by", Ipld::Null),
+            ("validated_by", Ipld::Null),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let hash = crate::walk::hash8(&crate::walk::encode(&Ipld::Map(m.clone())));
+        m.insert("hash".to_string(), Ipld::Bytes(hash));
+        Ipld::Map(m)
+    }
+
+    #[test]
+    fn runtime_parts_compare_by_size_and_align() {
+        let same = compare(&record(runtime(8, 8, true)), &record(runtime(8, 8, true))).unwrap();
+        assert_eq!(
+            (same.compat, same.changes.len()),
+            (Compat::Safe, 0),
+            "{same:?}"
+        );
+
+        let moved = compare(&record(runtime(8, 8, true)), &record(runtime(16, 8, true))).unwrap();
+        assert_eq!(moved.compat, Compat::Safe);
+        assert_eq!(moved.changes.len(), 1, "{moved:?}");
+        assert!(
+            moved.changes[0].what.contains("size or alignment"),
+            "{moved:?}"
+        );
+
+        let marked = compare(&record(runtime(8, 8, true)), &record(runtime(8, 8, false))).unwrap();
+        assert_eq!(marked.compat, Compat::Safe);
+        assert!(
+            !marked.changes.iter().any(|c| c.what.contains("size")),
+            "{marked:?}"
+        );
+
+        // A record written before runtime parts had a size: its path, read, Safe to the new body.
+        let legacy = Ipld::Map(
+            [(
+                "runtime".to_string(),
+                text("implicit:alloc::sync::Arc<Pool>"),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let up = compare(&record(legacy), &record(runtime(8, 8, true))).unwrap();
+        assert_eq!(up.compat, Compat::Safe);
+    }
+
+    #[test]
+    fn runtime_bodies_are_checked() {
+        let bad = |part: Ipld| crate::check::layout_record("W", &record(part)).unwrap_err();
+        assert!(bad(runtime(6, 4, true)).contains("power-of-two"));
+        assert!(bad(runtime(8, 3, true)).contains("power-of-two"));
+        assert!(
+            bad(Ipld::Map(
+                [("runtime".to_string(), Ipld::Null)].into_iter().collect()
+            ))
+            .contains("not a map")
+        );
+        crate::check::layout_record("W", &record(runtime(0, 1, false))).unwrap();
     }
 }

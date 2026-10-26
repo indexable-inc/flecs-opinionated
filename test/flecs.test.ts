@@ -369,11 +369,12 @@ describe("described layouts", () => {
       ["o", { option: "i32" }, "LastWriter"],
       ["u", { union: "Shape", variants: [["None", null], ["Circle", circle]] }, "LastWriter"],
       ["m", { map: ["string", "u8"] }, "LastWriter"],
-      ["r", { runtime: "phys.Body" }, "LastWriter"],
+      ["r", { runtime: { size: 8, align: 8, implicit: false } }, "LastWriter"],
+      ["q", { runtime: "phys.Body" }, "LastWriter"],
     ],
   };
   const rec = (l: unknown = layout) => ({ ...record("W", 1, l), merge: null });
-  const good = { h: 0.5, b: -2, o: [7], u: { Circle: { r: 1.5 } }, m: [["b", 1], ["aa", 2]], r: null };
+  const good = { h: 0.5, b: -2, o: [7], u: { Circle: { r: 1.5 } }, m: [["b", 1], ["aa", 2]], r: null, q: null };
   const doc = (value: unknown, l: unknown = layout) => ({
     version: 2,
     layouts: { W: rec(l) },
@@ -414,7 +415,9 @@ describe("described layouts", () => {
     expect(bad({ union: null, variants: [["A", "i32"]] })).toThrow(/not a struct or null/);
     expect(bad({ option: "i32", extra: 1 })).toThrow(/unknown key "extra"/);
     expect(bad({ map: ["string"] })).toThrow(/not \[key, value\]/);
-    expect(bad({ runtime: null })).toThrow(/path is not text/);
+    expect(bad({ runtime: null })).toThrow(/runtime layout's body is not a map/);
+    expect(bad({ runtime: { size: 6, align: 4, implicit: true } })).toThrow(/power-of-two align/);
+    expect(bad({ runtime: { size: 8, align: 8 } })).toThrow(/has no "implicit"/);
     expect(bad("f128")).toThrow(/unknown primitive/);
     // A whole option or map value carries the component's rule, as any non-struct does.
     expect(() => checkDocument(withLayouts({ O: record("O", 1, { option: "i32" }) }))).not.toThrow();

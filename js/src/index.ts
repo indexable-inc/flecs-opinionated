@@ -43,8 +43,9 @@ export type Layout =
   | { union: string | null; variants: [name: string, payload: Layout | null][] }
   /** A value is `[[key, value], ...]`, keys unique and sorted by their DAG-CBOR encoding. */
   | { map: [key: Layout, value: Layout] }
-  /** Process-local state: the value is always null. */
-  | { runtime: string }
+  /** Process-local state: the value is always null. The body is the part's size and alignment in memory and whether
+   * the derive made it for a type with no description; a record written before had a Rust path as text. */
+  | { runtime: { size: number; align: number; implicit: boolean } | string }
   /** A logical type (SPEC.md, "Logical types"): the value is `of`'s, which also decides the encoding, and the rules
    * (`range`, `finite`, `unit`, `refers_to`, `validated`) restrict it. `of` is never itself logical. */
   | { logical: string | null; of: Layout; rules: Record<string, unknown> };
@@ -792,7 +793,18 @@ function checkLayout(l: unknown, covered: boolean): void {
     checkLayout(kv[0], true);
     checkLayout(kv[1], true);
   } else if ("runtime" in l) {
-    if (typeof exact(l, ["runtime"], "runtime layout").runtime !== "string") throw new Error("a runtime layout's path is not text");
+    const r = exact(l, ["runtime"], "runtime layout").runtime;
+    if (typeof r !== "string") {
+      const m = exact(r, ["size", "align", "implicit"], "runtime layout's body");
+      const size = Number(m.size), align = Number(m.align);
+      if (!Number.isInteger(size) || !Number.isInteger(align) || typeof m.size === "string" || typeof m.align === "string") {
+        throw new Error("a runtime layout's size or align is not an integer");
+      }
+      if (size < 0 || align < 1 || (align & (align - 1)) !== 0 || size % align !== 0) {
+        throw new Error(`runtime size ${size} and align ${align}: the size is not a multiple of a power-of-two align`);
+      }
+      if (typeof m.implicit !== "boolean") throw new Error("runtime implicit is not a bool");
+    }
   } else if ("logical" in l) {
     const m = exact(l, ["logical", "of", "rules"], "logical layout");
     checkName(m.logical, "logical name");
@@ -951,7 +963,7 @@ function checkValue(v: unknown, l: Layout): void {
       prev = key;
     }
   } else if ("runtime" in l) {
-    if (v !== null) throw new Error(`a runtime value of ${l.runtime} is ${show(v)}, not null`);
+    if (v !== null) throw new Error(`a runtime value is ${show(v)}, not null`);
   } else if ("logical" in l) {
     checkValue(v, l.of);
     const named = l.logical === null ? "" : ` (${l.logical})`;

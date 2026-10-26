@@ -72,6 +72,28 @@ fn text<'a>(v: &'a Ipld, what: &str) -> R<&'a str> {
     }
 }
 
+/// A runtime layout's body: `{"size": n, "align": n, "implicit": bool}` (size >= 0, align a power of two), or the
+/// text of a record written before (a Rust path, read but never written).
+fn runtime_layout(r: &Ipld) -> R<()> {
+    if let Ipld::String(_) = r {
+        return Ok(());
+    }
+    let m = exact(r, &["size", "align", "implicit"], "runtime layout's body").map_err(|e| {
+        format!("{e} (a runtime layout is {{\"runtime\": {{\"size\", \"align\", \"implicit\"}}}})")
+    })?;
+    let size = int(&m["size"], "runtime size")?;
+    let align = int(&m["align"], "runtime align")?;
+    if size < 0 || align < 1 || align.count_ones() != 1 || size % align != 0 {
+        return Err(format!(
+            "runtime size {size} and align {align}: the size is not a multiple of a power-of-two align"
+        ));
+    }
+    match &m["implicit"] {
+        Ipld::Bool(_) => Ok(()),
+        _ => Err("runtime implicit is not a bool".into()),
+    }
+}
+
 fn int(v: &Ipld, what: &str) -> R<i128> {
     match v {
         Ipld::Integer(i) => Ok(*i),
@@ -308,11 +330,7 @@ fn layout_in(l: &Ipld, covered: bool, lenient: bool) -> R<()> {
                 crate::logical::check_node(m)?;
                 layout_in(&m["of"], covered, lenient)
             } else if m.contains_key("runtime") {
-                text(
-                    &exact(l, &["runtime"], "runtime layout")?["runtime"],
-                    "runtime name",
-                )
-                .map(|_| ())
+                runtime_layout(&exact(l, &["runtime"], "runtime layout")?["runtime"])
             } else {
                 Err(format!(
                     "unknown layout kind with keys {:?}",

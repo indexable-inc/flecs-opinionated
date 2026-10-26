@@ -97,10 +97,16 @@ pub fn member_err(name: &str, e: String) -> String {
     }
 }
 
-/// The prefix of a runtime part's type text when the derive made it because the member's type
-/// has no description (not marked `#[describe(runtime)]`): `{"runtime": "implicit:<type>"}`. A
-/// check over saved components refuses those.
-pub const IMPLICIT_RUNTIME: &str = "implicit:";
+/// Whether a runtime layout (the `{"runtime": ...}` map's value, SPEC.md "Layouts") is implicit: the derive made it
+/// because the member's type has no description (not marked `#[describe(runtime)]`). A check over saved components
+/// refuses those. A legacy record's runtime layout is text, `implicit:<type>` for an implicit one.
+pub fn runtime_is_implicit(runtime: &Ipld) -> bool {
+    match runtime {
+        Ipld::Map(m) => matches!(m.get("implicit"), Some(Ipld::Bool(true))),
+        Ipld::String(s) => s.starts_with("implicit:"),
+        _ => false,
+    }
+}
 
 /// What the derive and the macros call. Not a stable interface.
 #[doc(hidden)]
@@ -158,10 +164,16 @@ pub mod __private {
         Ipld::Map(m)
     }
 
-    /// `{"runtime": path}`.
-    pub fn runtime_layout(path: impl Into<String>) -> Ipld {
+    /// `{"runtime": {"size": n, "align": n, "implicit": bool}}` for a runtime part of type `T`: its size and alignment
+    /// (what its bytes in memory need), never its Rust path, which a compiler or a move to another module changes
+    /// although nothing in memory did.
+    pub fn runtime_layout<T>(implicit: bool) -> Ipld {
+        let mut r = BTreeMap::new();
+        r.insert("size".to_string(), Ipld::Integer(size_of::<T>() as i128));
+        r.insert("align".to_string(), Ipld::Integer(align_of::<T>() as i128));
+        r.insert("implicit".to_string(), Ipld::Bool(implicit));
         let mut m = BTreeMap::new();
-        m.insert("runtime".to_string(), text(path));
+        m.insert("runtime".to_string(), Ipld::Map(r));
         Ipld::Map(m)
     }
 
@@ -248,11 +260,6 @@ pub mod __private {
         (core::ptr::from_ref(f) as usize) - (core::ptr::from_ref(s) as usize)
     }
 
-    /// The name of a type as written (`a::b::Foo` gives `Foo`), spaces removed.
-    pub fn type_text(s: &str) -> String {
-        s.chars().filter(|c| !c.is_whitespace()).collect()
-    }
-
     // What the derive's code reaches a member's type through, so a member whose type has no description (a
     // foreign type, a handle, a channel) is a runtime part instead of a compile error. Autoref specialisation:
     // `(&&Probe::<T>(PhantomData)).p_layout()` picks `ViaDescribe` when `T: Describe` and `ViaRuntime` otherwise.
@@ -296,11 +303,7 @@ pub mod __private {
 
     impl<T> ViaRuntime<T> for Probe<T> {
         fn p_layout(&self) -> Ipld {
-            runtime_layout(format!(
-                "{}{}",
-                crate::IMPLICIT_RUNTIME,
-                type_text(core::any::type_name::<T>())
-            ))
+            runtime_layout::<T>(true)
         }
         fn p_read(&self, _v: &T, _refs: &mut dyn Refs) -> R<Ipld> {
             Ok(Ipld::Null)

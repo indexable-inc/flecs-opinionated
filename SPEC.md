@@ -133,7 +133,13 @@ the hash of its type's record, so a value can never be read with the wrong layou
 - `{"union": path | null, "variants": [[name, L | null], ...]}`, a variant's payload being a struct (a Rust tuple
   variant's members are named `0`, `1`, ...) or null;
 - `{"map": [K, V]}`;
-- `{"runtime": path}`;
+- `{"runtime": {"size": n, "align": n, "implicit": bool}}`: a part that is not saved, recorded by what its bytes in
+  memory need (its Rust `size_of` and `align_of`; `size` a multiple of the power-of-two `align`), never by its Rust
+  path, which a compiler (std moving `Arc`) or a move to another module changes while nothing in memory does.
+  `implicit` is true when the derive made the part because the member's type has no description, false for one
+  marked `runtime`. Since the size is the target's, a runtime part holding a pointer hashes differently on wasm32
+  and on a 64-bit target. A reader also accepts the text body records written before this had (`{"runtime":
+  path}`, `implicit:<type>` for an implicit part) and never writes it;
 - `{"logical": path | null, "of": L, "rules": {rule: arg, ...}}`, a logical type ("Logical types").
 
 `"f16"`, `"bf16"` and the four kinds from option to runtime come only from described types ("Described types"); a Flecs-only world
@@ -171,7 +177,7 @@ against it, so a type, its Flecs meta and its layout record cannot disagree. A h
 records' hashes.
 
 `#[derive(Describe)]` takes, under `#[describe(...)]`: on the type `name = "Path"` and `runtime` (the whole type is
-process-local: layout `{"runtime": name}`, value null, restored as `Default`); on a field `merge = "Rule"`,
+process-local: layout `{"runtime": {"size", "align", "implicit": false}}`, value null, restored as `Default`); on a field `merge = "Rule"`,
 `runtime`, `with = path` (a module with `layout`, `read` and `from_value`) and `name = "member"`; on a variant
 `name = "Variant"`. The logical rules ("Logical types"): on a field `range(min = a, max = b)` (literal bounds, either
 left out), `unit = "path"` and `finite`; on a type `validate = path` (a `fn(&Self) -> Result<(), String>`); and, on a
@@ -238,7 +244,10 @@ an unsigned one is `range [1, null]`.
 
 - **Safe**: every old value is a new value as it is: a range loosened or dropped, `finite` added or dropped, a unit
   added or dropped, a catalog name added, a check dropped, an enum or bitmask constant added or renumbered, a union
-  variant added, a merge rule, member rule slot, name, member order or permission changed.
+  variant added, a merge rule, member rule slot, name, member order or permission changed, a runtime part's size,
+  alignment or `implicit` changed (its value is always null; a host that patches values in memory checks the size
+  itself). A runtime part with the same size, alignment and `implicit` is no change, whatever its Rust type; a legacy
+  text body against a new one is Safe.
 - **NeedsCheck**: old values read as they are but must pass the new rules: a range added or tightened, a check added,
   `refers_to` added.
 - **NeedsMigration**: old values do not read as new ones: a physical change (a primitive, a kind, a member or variant

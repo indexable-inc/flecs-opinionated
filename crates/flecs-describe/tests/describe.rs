@@ -326,3 +326,77 @@ fn glamx_pose3() {
     let doc = w.document(&["e"]).unwrap();
     assert_eq!(find(&doc, "Pose"), Some(&v));
 }
+
+/// Two handle types of one size and alignment under two Rust paths, neither described.
+#[allow(dead_code)]
+mod one {
+    pub struct Handle(pub std::sync::Arc<u32>);
+}
+#[allow(dead_code)]
+mod two {
+    pub struct Handle(pub String);
+}
+
+#[allow(dead_code)]
+#[derive(Describe)]
+#[describe(name = "Holder")]
+struct HolderOne {
+    h: one::Handle,
+    #[describe(runtime)]
+    scratch: Vec<u8>,
+}
+
+#[allow(dead_code)]
+#[derive(Describe)]
+#[describe(name = "Holder")]
+struct HolderTwo {
+    h: std::sync::Arc<two::Handle>,
+    #[describe(runtime)]
+    scratch: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Describe, Default)]
+#[describe(runtime)]
+struct Cache(Vec<u64>);
+
+/// A runtime part (implicit or marked) is recorded by its size and alignment, never its Rust path: a compiler that
+/// moves `Arc` or a move to another module leaves its layout, and so its hash, as it was.
+#[test]
+fn runtime_layout_has_no_rust_path() {
+    assert_eq!(HolderOne::layout(), HolderTwo::layout());
+    check::described_layout(&HolderOne::layout()).unwrap();
+    let body = |size: usize, align: usize, implicit: bool| {
+        map(&[(
+            "runtime",
+            map(&[
+                ("size", Ipld::Integer(size as i128)),
+                ("align", Ipld::Integer(align as i128)),
+                ("implicit", Ipld::Bool(implicit)),
+            ]),
+        )])
+    };
+    let Ipld::Map(lm) = HolderOne::layout() else {
+        panic!()
+    };
+    let Ipld::List(members) = &lm["members"] else {
+        panic!()
+    };
+    let ptr = core::mem::size_of::<usize>();
+    let vec = core::mem::size_of::<Vec<u8>>();
+    assert_eq!(
+        members
+            .iter()
+            .map(|m| match m {
+                Ipld::List(m) => m[1].clone(),
+                _ => panic!(),
+            })
+            .collect::<Vec<_>>(),
+        [body(ptr, ptr, true), body(vec, ptr, false)]
+    );
+    assert_eq!(Cache::layout(), body(vec, ptr, false));
+    let Ipld::Map(b) = body(ptr, ptr, true) else {
+        panic!()
+    };
+    assert!(flecs_describe::runtime_is_implicit(&b["runtime"]));
+}

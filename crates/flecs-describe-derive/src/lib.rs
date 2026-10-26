@@ -1,9 +1,9 @@
 //! `#[derive(Describe)]` for flecs-describe. See that crate for the layouts it writes.
 //!
 //! Leniency:
-//! - a member whose type does not implement `Describe` is a runtime part (layout `{"runtime": "<its Rust type>"}`,
-//!   value null, restored as its `Default`, or an error when it has none) instead of a compile error, so every
-//!   component can derive it; `layouts.lock` shows each such part;
+//! - a member whose type does not implement `Describe` is a runtime part (layout `{"runtime": {"size": n, "align":
+//!   n, "implicit": true}}`, value null, restored as its `Default`, or an error when it has none) instead of a
+//!   compile error, so every component can derive it; `layouts.lock` shows each such part;
 //! - a runtime part (marked or not) needs no `Default` to compile: restoring one without it is the error;
 //! - the default name is the Rust path (`module_path!()` and the name, `my_crate::base::Uid`), so two types with
 //!   one name in two modules never meet under `flecs.rust.described`;
@@ -12,8 +12,8 @@
 //!
 //! Attributes, all under `#[describe(...)]`:
 //! - on the type: `name = "Path"` (the layout's and Flecs type's name; default the Rust path with its type
-//!   arguments' names), `runtime` (the whole type holds process-local state: layout `{"runtime": name}`, value null,
-//!   restored as `Default::default()`), `transparent` (a struct of one field is described as that field: its
+//!   arguments' names), `runtime` (the whole type holds process-local state: layout `{"runtime": {"size": n, "align": n,
+//!   "implicit": false}}`, value null, restored as `Default::default()`), `transparent` (a struct of one field is described as that field: its
 //!   layout, value and Flecs meta, so a newtype component `Ship(sim::Ship)` shows `Ship`'s members, not a
 //!   member `0` holding them);
 //! - on a field: `merge = "Rule"` (the member's rule slot: LastWriter, AddWins, Counter, KeepBoth or Text; not inside
@@ -294,7 +294,7 @@ fn layout_of(f: &Field) -> Ts {
             quote!((&&#p::__private::Probe::<#ty>(::core::marker::PhantomData)).p_layout())
         }
         Kind::Runtime => {
-            quote!(#p::__private::runtime_layout(#p::__private::type_text(stringify!(#ty))))
+            quote!(#p::__private::runtime_layout::<#ty>(false))
         }
         Kind::With(w) => quote!(#w::layout()),
     };
@@ -501,7 +501,7 @@ fn expand(input: &DeriveInput) -> syn::Result<Ts> {
     let body = if c.runtime {
         quote! {
             fn layout() -> #p::Ipld {
-                #p::__private::runtime_layout(<Self as #p::Describe>::type_name())
+                #p::__private::runtime_layout::<Self>(false)
             }
             fn read(&self, _refs: &mut dyn #p::Refs) -> #p::R<#p::Ipld> {
                 ::core::result::Result::Ok(#p::Ipld::Null)
