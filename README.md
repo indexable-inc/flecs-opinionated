@@ -86,6 +86,30 @@ and `blocks` (giving `Blocks::car` and `Blocks::store`). It also exports `diff`,
 strict reader `check`, `merge_state` and `merge_fields` (over the `merge` crate), and the reserved `Change` and
 `Countersignature` blocks.
 
+### A host world
+
+An application that owns a Flecs world (a game's live state) saves and restores it with `flecs_snapshot::Host`
+(feature `host`), on the world's own `ecs_world_t*`, with one Flecs in the process. `#[derive(Describe)]` (crate
+`flecs-describe`) describes any Rust type, enums with data, options, maps and glam types included, and registers
+the same shape as Flecs meta:
+
+```rust
+#[derive(flecs_describe::Describe, Default, Clone)]
+struct Hold { items: Vec<(u32, f32)>, target: Option<Entity>, #[describe(runtime)] scratch: Vec<u8> }
+
+unsafe { flecs_describe::register::<Hold>(w.ptr_mut().cast(), *w.component::<Hold>().id())? };
+let mut host = unsafe { Host::new(w.ptr_mut().cast(), "Uid", "Persist")? };
+let doc = host.encode(&Selection::Tagged, &Encode::default())?;      // DAG-CBOR
+let b = host.blocks(&Selection::Tagged, &Encode::default())?;        // incremental: only changed tables
+host.restore(&doc, &migrations, &mut Restore::default())?;           // into a world without those ids
+host.migrate_live(&migrations, "Hold", "HoldV2")?;                   // after a patch adds HoldV2
+```
+
+`flecs-c` with the `host` feature links the host's `flecs_ecs_sys` instead of building Flecs, so it must end up in
+the same artifact (binary or dylib) as `flecs_ecs_sys`: a build with `-fvisibility=hidden` hides Flecs's symbols from
+every other artifact. SPEC.md "Host worlds", "Migrations" and "API" have the details; `host-check/` is a host built on
+flecs_ecs that tests all of it.
+
 ## What a snapshot holds
 
 There is one record per entity:

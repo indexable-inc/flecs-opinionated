@@ -1,4 +1,5 @@
-//! Flecs's C (built by build.rs) and the few declarations Rust calls it through.
+//! Flecs's C (built by build.rs) and the few declarations Rust calls it through. With the `host` feature this crate
+//! compiles only csrc/glue.c and links the application's Flecs through flecs_ecs_sys (SPEC.md, "Host worlds").
 //!
 //! On wasm32-unknown-unknown there is no C library, so this crate also provides the parts of one that are not in
 //! wasm-libc/: malloc, calloc, realloc and free on Rust's allocator (with a 16-byte header holding the size, adapted
@@ -39,6 +40,18 @@ pub struct glue_writer_t {
 pub struct ecs_meta_cursor_t {
     _private: [u8; 0],
 }
+
+/// Opaque: a Flecs table, compared by address only.
+#[repr(C)]
+pub struct ecs_table_t {
+    _private: [u8; 0],
+}
+
+/// The callbacks `glue_opaque_serialize` calls: one value of `type` at `ptr`, and a member name before a struct-shaped
+/// opaque's value. Return 0 to go on, non-zero to stop with an error.
+pub type glue_value_t =
+    unsafe extern "C" fn(ctx: *mut c_void, type_: ecs_entity_t, ptr: *const c_void) -> c_int;
+pub type glue_member_t = unsafe extern "C" fn(ctx: *mut c_void, name: *const c_char) -> c_int;
 
 #[repr(C)]
 pub struct ecs_type_t {
@@ -197,6 +210,22 @@ unsafe extern "C" {
         size: usize,
     );
     pub fn glue_writer_free(world: *const ecs_world_t, w: *mut glue_writer_t);
+    pub fn glue_writer_ptr(w: *mut glue_writer_t) -> *const c_void;
+    pub fn glue_table_dirty(
+        world: *mut ecs_world_t,
+        table: *mut ecs_table_t,
+        out: *mut i32,
+        cap: i32,
+    ) -> i32;
+    pub fn glue_opaque_as_type(world: *const ecs_world_t, ty: ecs_entity_t) -> ecs_entity_t;
+    pub fn glue_opaque_serialize(
+        world: *const ecs_world_t,
+        ty: ecs_entity_t,
+        ptr: *const c_void,
+        value: glue_value_t,
+        member: glue_member_t,
+        ctx: *mut c_void,
+    ) -> c_int;
 
     pub fn ecs_meta_push(c: *mut ecs_meta_cursor_t) -> c_int;
     pub fn ecs_meta_pop(c: *mut ecs_meta_cursor_t) -> c_int;
@@ -251,6 +280,34 @@ unsafe extern "C" {
         path: *const ecs_entity_t,
     ) -> *mut ecs_entity_t;
     pub fn ecs_is_alive(world: *const ecs_world_t, entity: ecs_entity_t) -> bool;
+    pub fn ecs_new(world: *mut ecs_world_t) -> ecs_entity_t;
+    pub fn ecs_delete(world: *mut ecs_world_t, entity: ecs_entity_t);
+    pub fn ecs_add_id(world: *mut ecs_world_t, entity: ecs_entity_t, id: ecs_id_t);
+    pub fn ecs_remove_id(world: *mut ecs_world_t, entity: ecs_entity_t, id: ecs_id_t);
+    pub fn ecs_is_enabled_id(world: *const ecs_world_t, entity: ecs_entity_t, id: ecs_id_t)
+    -> bool;
+    pub fn ecs_is_deferred(world: *const ecs_world_t) -> bool;
+    pub fn ecs_defer_begin(world: *mut ecs_world_t) -> bool;
+    pub fn ecs_get_mut_id(
+        world: *const ecs_world_t,
+        entity: ecs_entity_t,
+        id: ecs_id_t,
+    ) -> *mut c_void;
+    pub fn ecs_modified_id(world: *mut ecs_world_t, entity: ecs_entity_t, id: ecs_id_t);
+    pub fn glue_cursor_new(
+        world: *const ecs_world_t,
+        ty: ecs_entity_t,
+        ptr: *mut c_void,
+    ) -> *mut ecs_meta_cursor_t;
+    pub fn glue_cursor_free(c: *mut ecs_meta_cursor_t);
+    pub fn glue_set_string(slot: *mut *mut c_char, s: *const c_char, len: i32) -> c_int;
+    pub fn ecs_defer_end(world: *mut ecs_world_t) -> bool;
+    pub fn ecs_get_table(world: *const ecs_world_t, entity: ecs_entity_t) -> *mut ecs_table_t;
+    pub fn ecs_lookup_child(
+        world: *const ecs_world_t,
+        parent: ecs_entity_t,
+        name: *const c_char,
+    ) -> ecs_entity_t;
     pub fn ecs_set_name(
         world: *mut ecs_world_t,
         entity: ecs_entity_t,
@@ -267,6 +324,9 @@ unsafe extern "C" {
     pub static EcsInherit: ecs_entity_t;
     pub static EcsDontFragment: ecs_entity_t;
     pub static EcsWildcard: ecs_entity_t;
+    pub static EcsDisabled: ecs_entity_t;
+    pub static ECS_TOGGLE: ecs_id_t;
+    pub static EcsCanToggle: ecs_entity_t;
     pub static EcsExclusive: ecs_entity_t;
     pub static EcsParentDepth: ecs_entity_t;
     pub static FLECS_IDEcsIdentifierID_: ecs_entity_t;
@@ -298,6 +358,115 @@ pub fn pair_first(id: ecs_id_t) -> ecs_entity_t {
 
 pub fn pair_second(id: ecs_id_t) -> ecs_entity_t {
     id & 0xFFFF_FFFF
+}
+
+// ---- Described types (crates/flecs-describe): Flecs meta and lifecycle hooks registered from a Rust description,
+// through the glue_describe_* functions at the end of csrc/glue.c. ----
+
+/// Opaque: the serializer an opaque type's serialize callback is given.
+#[repr(C)]
+pub struct ecs_serializer_t {
+    _private: [u8; 0],
+}
+
+/// Opaque: passed to lifecycle hooks, never read here.
+#[repr(C)]
+pub struct ecs_type_info_t {
+    _private: [u8; 0],
+}
+
+pub type ecs_xtor_t =
+    unsafe extern "C" fn(ptr: *mut c_void, count: i32, ti: *const ecs_type_info_t);
+pub type ecs_copy_t = unsafe extern "C" fn(
+    dst: *mut c_void,
+    src: *const c_void,
+    count: i32,
+    ti: *const ecs_type_info_t,
+);
+pub type ecs_move_t = unsafe extern "C" fn(
+    dst: *mut c_void,
+    src: *mut c_void,
+    count: i32,
+    ti: *const ecs_type_info_t,
+);
+pub type ecs_meta_serialize_t =
+    unsafe extern "C" fn(ser: *const ecs_serializer_t, src: *const c_void) -> c_int;
+
+unsafe extern "C" {
+    pub fn glue_describe_primitive(kind: i32) -> ecs_entity_t;
+    pub fn glue_describe_type(
+        world: *mut ecs_world_t,
+        parent: ecs_entity_t,
+        name: *const c_char,
+        size: i32,
+        align: i32,
+    ) -> ecs_entity_t;
+    pub fn glue_describe_member(
+        world: *mut ecs_world_t,
+        type_: ecs_entity_t,
+        name: *const c_char,
+        member_type: ecs_entity_t,
+        count: i32,
+        offset: i32,
+    ) -> c_int;
+    pub fn glue_describe_array(
+        world: *mut ecs_world_t,
+        entity: ecs_entity_t,
+        elem: ecs_entity_t,
+        count: i32,
+    ) -> ecs_entity_t;
+    pub fn glue_describe_vector(
+        world: *mut ecs_world_t,
+        entity: ecs_entity_t,
+        elem: ecs_entity_t,
+    ) -> ecs_entity_t;
+    pub fn glue_describe_enum(
+        world: *mut ecs_world_t,
+        entity: ecs_entity_t,
+        underlying: ecs_entity_t,
+    ) -> c_int;
+    pub fn glue_describe_enum_constant(
+        world: *mut ecs_world_t,
+        type_: ecs_entity_t,
+        name: *const c_char,
+        value: i64,
+        value_unsigned: u64,
+    ) -> c_int;
+    pub fn glue_describe_bitmask(world: *mut ecs_world_t, entity: ecs_entity_t) -> c_int;
+    pub fn glue_describe_bitmask_constant(
+        world: *mut ecs_world_t,
+        type_: ecs_entity_t,
+        name: *const c_char,
+        value: u32,
+    ) -> c_int;
+    pub fn glue_describe_opaque(
+        world: *mut ecs_world_t,
+        type_: ecs_entity_t,
+        as_type: ecs_entity_t,
+        serialize: ecs_meta_serialize_t,
+    ) -> ecs_entity_t;
+    #[allow(clippy::too_many_arguments)]
+    pub fn glue_describe_component(
+        world: *mut ecs_world_t,
+        name: *const c_char,
+        size: i32,
+        align: i32,
+        ctor: ecs_xtor_t,
+        dtor: ecs_xtor_t,
+        copy: ecs_copy_t,
+        move_: ecs_move_t,
+        copy_ctor: ecs_copy_t,
+        move_ctor: ecs_move_t,
+        ctor_move_dtor: ecs_move_t,
+        move_dtor: ecs_move_t,
+    ) -> ecs_entity_t;
+    pub fn glue_describe_ser_value(
+        ser: *const ecs_serializer_t,
+        type_: ecs_entity_t,
+        ptr: *const c_void,
+    ) -> c_int;
+    pub fn glue_describe_ser_member(ser: *const ecs_serializer_t, name: *const c_char) -> c_int;
+    pub fn glue_describe_ser_world(ser: *const ecs_serializer_t) -> *const ecs_world_t;
 }
 
 #[cfg(target_arch = "wasm32")]

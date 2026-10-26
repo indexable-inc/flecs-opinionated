@@ -1,8 +1,9 @@
 # Handoff
 
-**State:** commit 959ccd4 (review fixes and work items 1 to 6) is on main, and CI run 40159500571 is green (build,
-cargo test 17, bun test 12 including native vs wasm, rustfmt, clippy native/all-features/wasm32, ruff, pyright,
-no-imports check, Lean proofs).
+**State:** the host-world work (lane FLECS-OPINIONATED, 2026-10-25) is on main: `Host` (save, incremental blocks,
+restore, live migration) on a host's own Flecs world, described types (`flecs-describe`, `#[derive(Describe)]`), and
+`host-check/`, a host on flecs_ecs that tests both. `uv run build.py --test` passed on dev-aws-8 (cargo wasm and
+native, bun test, tsc, host-check, cargo test), with ruff, pyright, rustfmt and the four clippy runs clean.
 
 Build and test with `uv run build.py --test` on a dev host. dev-aws-8 has no lane directory any more; a new lane sets
 up its own (clang/llvm-ar for wasm32, bun, uv, and binaryen 133 as `WASM_OPT`).
@@ -28,7 +29,7 @@ up its own (clang/llvm-ar for wasm32, bun, uv, and binaryen 133 as `WASM_OPT`).
 | D2 uptr/iptr | refused in layouts (walk and readers) | `walk.rs`, `check.rs`, `index.ts` |
 | S1, S2, S3 | null handle returns -1/null, `*len` written unaligned (and may be null), `buf_free(null)` is a no-op | `ffi.rs`, `world.h` |
 | S7 libc exports | documented, not hidden (README "Limits") | |
-| M1, M2, M3, M4 | log drained around walks; `ecs_fini` on Schema failure; thread note on `World::new` and in world.h; `-0.0` kept, SPEC and test `negative_zero_is_kept` agree | `world.rs`, SPEC "Encoding" |
+| M1, M2, M3, M4 | log drained around walks; `ecs_fini` on Schema failure; thread note on `World::new` and in world.h; `-0.0` is kept in the `Ipld` document (test `negative_zero_is_kept`) but its bytes are those of `0.0`, as `serde_ipld_dagcbor` writes it and refuses `-0.0` on decode (SPEC "Encoding", corrected 2026-10-25) | `world.rs`, `cbor.rs`, SPEC "Encoding" |
 
 ## Work items
 
@@ -82,6 +83,29 @@ The renderer's shims (`site/renderer/core/src/scripts.rs`) can go:
 - Hide the libc shim exports (malloc, strtod, ...) in the wasm? It is documented, not done.
 - Should the TS reader recompute layout hashes? That needs async SHA-256 in browsers.
 
+## Host worlds (2026-10-25)
+
+What the space game needs to replace `crates/space-snapshot` (its model: the-game `docs/agents/rust-live.md`).
+
+- **Pin.** Flecs 4.1.6 (`6e4cd338a`) plus the game's fork (`vendor/flecs`); flecs_ecs and flecs_ecs_sys at rev
+  `bf956db99b69d41ee142c9d52054911af28d7e93`. `host-check` patches flecs_ecs_sys to `vendor/flecs_ecs_sys` (that
+  pin built from our amalgamation): the git flecs_ecs_sys lacks the fork's symbols (`EcsParentDepth`), so the root
+  workspace's `--all-features` does not link; CI and build.py list features instead.
+- **Linking.** `flecs-c` with `host` links the host's flecs_ecs_sys. It must be in the same artifact as
+  flecs_ecs_sys: the game's optimised profile builds with `-fvisibility=hidden`.
+- **Coverage.** The game's 2797 component types (738 tags, 2059 with data): 1269 fit Flecs meta today, all 2797 are
+  described by the derive with 0 refusals, 56 of them with a `#[describe(runtime)]` part.
+- **Numbers** (dev-aws-8, Zen 4, loaded; 6805 entities, `host-check` `bench_game_size`): document 1,582,316 bytes,
+  120,805 zstd-3; encode 17.2 ms (was 167); `blocks_full` 46 ms; unchanged rehash 10.5 ms; 1% changed 14.4 ms;
+  `blocks_new` at 1% 10.6 ms (358 blocks); restore 80 to 92 ms (was 374); `migrate_live` 44 to 62 ms.
+  space-snapshot on the M5 Max: 160,921 bytes zstd, encode 9.9 + 3.3 ms, decode 1.5 + 166 ms.
+- **Game lane steps.** Derive `Describe` on each component and call `flecs_describe::register::<T>` after
+  flecs_ecs registers it; lock layouts by committing the layout records' hashes; `Host::new(world.ptr_mut().cast(),
+  "Uid", "Persist")`; `encode` to save, `blocks`/`blocks_new` for the state hash, `restore` on load, a
+  `Migrations` edge plus `migrate_live` for each `FooV2`.
+- **Not done.** Restore of migrated values goes through `Ipld` (the direct path covers only values whose layout is
+  live). The raw-bytes cache sees an entity member by its local id (SPEC "Incremental hashing").
+
 ## Host
 
-dev-aws-8: `~/flecs-opinionated` is deleted, and the host-ledger row is RELEASED.
+dev-aws-8: `~/flecsop` is deleted, and the host-ledger row is RELEASED.

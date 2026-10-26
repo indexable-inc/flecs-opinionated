@@ -11,6 +11,7 @@ use sys::{ecs_entity_t, ecs_world_t};
 
 use crate::check::{self, Blobs};
 use crate::dag::{self, Blocks};
+use crate::described::Resolve;
 use crate::schema::{self, Schema};
 use crate::walk::{self, Walk};
 
@@ -189,32 +190,28 @@ impl World {
         if needs_ids(value) && self.ids.is_none() {
             self.ids = Some(self.index_ids()?);
         }
-        let ids = self.ids.as_ref();
-        take_log();
-        // SAFETY: a new writer over a default-constructed value of type `c`, freed below.
-        let wr = unsafe { sys::glue_writer_new(w, c) };
-        if wr.is_null() {
-            return Err(format!("{component}: cannot make a value of it"));
-        }
-        let mut cx = Writer {
+        let mut ids = ScriptIds {
             w,
             s,
-            // SAFETY: `wr` is live until freed below.
-            cur: unsafe { sys::glue_writer_cursor(wr) },
-            ids,
+            ids: self.ids.as_ref(),
         };
-        let r = cx.write(value, &layout).map(|()| {
-            // SAFETY: `wr` holds a value of type `c` of `size` bytes; ecs_set_id copies it with the type's hooks.
-            unsafe { sys::glue_writer_commit(w, wr, e, c, size) }
+        take_log();
+        let r = make_value(w, s, c, value, &layout, &mut ids).map(|v| {
+            // SAFETY: `v` holds a value of type `c` of `size` bytes; ecs_set_id copies it with the type's hooks.
+            unsafe { sys::glue_writer_commit(w, v.0, e, c, size) }
         });
-        // SAFETY: freed once.
-        unsafe { sys::glue_writer_free(w, wr) };
         let log = take_log();
         r.map_err(|m| format!("{path}: {component}: {m}"))?;
         if !log.is_empty() {
             return Err(format!("{path}: {component}: {}", log.join("; ")));
         }
         Ok(())
+    }
+
+    /// The world's raw pointer, for describing types in it (`crate::described::describe`) and for tests.
+    #[doc(hidden)]
+    pub fn as_ptr(&mut self) -> *mut ecs_world_t {
+        self.w
     }
 
     /// Renames an entity with Flecs's C API, which (unlike a script) takes any name, `#0` included.
@@ -355,7 +352,7 @@ impl Drop for World {
     }
 }
 
-fn script(w: *mut ecs_world_t, name: &str, code: &str) -> Result<(), String> {
+pub(crate) fn script(w: *mut ecs_world_t, name: &str, code: &str) -> Result<(), String> {
     let n = CString::new(name).map_err(|_| "script name contains a NUL byte".to_string())?;
     let c = CString::new(code).map_err(|_| format!("{name}: script contains a NUL byte"))?;
     take_log();
@@ -380,12 +377,111 @@ fn needs_ids(v: &Ipld) -> bool {
     }
 }
 
-/// Writes a checked value through a Flecs meta cursor, following its layout.
-struct Writer<'a> {
+/// A value being made: a default-constructed value of a type, then written. Freed on drop.
+pub(crate) struct Value(pub *mut sys::glue_writer_t, *const ecs_world_t);
+
+impl Value {
+    /// The value's memory.
+    pub fn ptr(&self) -> *const u8 {
+        // SAFETY: the writer is live while `self` is.
+        unsafe { sys::glue_writer_ptr(self.0) }.cast()
+    }
+}
+
+impl Drop for Value {
+    fn drop(&mut self) {
+        // SAFETY: freed once.
+        unsafe { sys::glue_writer_free(self.1, self.0) };
+    }
+}
+
+/// A value of type `ty` holding `v`, which was checked against `layout` (the type's layout): through the type's
+/// description when it has one (SPEC.md, "Described types"), else through a Flecs meta cursor.
+pub(crate) fn make_value(
+    w: *mut ecs_world_t,
+    s: &Schema,
+    ty: ecs_entity_t,
+    v: &Ipld,
+    layout: &Ipld,
+    ids: &mut dyn Resolve,
+) -> Result<Value, String> {
+    // SAFETY: a new writer over a default-constructed value of type `ty`, freed by Value's drop.
+    let wr = unsafe { sys::glue_writer_new(w, ty) };
+    if wr.is_null() {
+        return Err("cannot make a value of it".into());
+    }
+    let out = Value(wr, w);
+    if let Some(d) = crate::described::of(w, s.described, ty) {
+        // SAFETY: the writer's value is a live, constructed value of `ty`, which `d` describes.
+        unsafe { (d.write)(v, out.ptr().cast_mut(), ids)? };
+        return Ok(out);
+    }
+    let mut cx = Writer {
+        // SAFETY: `wr` is live while `out` is.
+        cur: unsafe { sys::glue_writer_cursor(wr) },
+        ids,
+    };
+    cx.write(v, layout)?;
+    Ok(out)
+}
+
+/// A script world's refs: stable ids through the index `World::set` builds, paths through the snapshot's own path
+/// resolution.
+struct ScriptIds<'a> {
     w: *mut ecs_world_t,
     s: &'a Schema,
-    cur: *mut sys::ecs_meta_cursor_t,
     ids: Option<&'a HashMap<[u8; 16], ecs_entity_t>>,
+}
+
+impl Resolve for ScriptIds<'_> {
+    fn entity(&mut self, r: &Ipld) -> Result<ecs_entity_t, String> {
+        let Ipld::Map(m) = r else {
+            return Err("not a ref".into());
+        };
+        if let Some(Ipld::Bytes(id)) = m.get("id") {
+            let id: [u8; 16] = id.as_slice().try_into().map_err(|_| "id is not 16 bytes")?;
+            return self
+                .ids
+                .and_then(|ids| ids.get(&id).copied())
+                .ok_or_else(|| format!("no entity has the stable id {}", hex(&id)));
+        }
+        if let Some(Ipld::String(p)) = m.get("path") {
+            return Walk::new(self.w, self.s).resolve(p);
+        }
+        Err("not a ref".into())
+    }
+}
+
+/// Writes a checked value through a Flecs meta cursor, following its layout.
+/// Writes `v` (checked against `layout`) over the live value of `ty` at `ptr`: by its description, or through a Flecs
+/// meta cursor.
+pub(crate) fn write_at(
+    w: *mut ecs_world_t,
+    s: &Schema,
+    ty: ecs_entity_t,
+    ptr: *mut u8,
+    v: &Ipld,
+    layout: &Ipld,
+    ids: &mut dyn Resolve,
+) -> Result<(), String> {
+    if let Some(d) = crate::described::of(w, s.described, ty) {
+        // SAFETY: `ptr` is a live, constructed value of `ty`, which `d` describes.
+        return unsafe { (d.write)(v, ptr, ids) };
+    }
+    // SAFETY: a cursor over the live value; freed below.
+    let cur = unsafe { sys::glue_cursor_new(w, ty, ptr.cast()) };
+    if cur.is_null() {
+        return Err("cannot write a value of it".into());
+    }
+    let r = Writer { cur, ids }.write(v, layout);
+    // SAFETY: made above, not used again.
+    unsafe { sys::glue_cursor_free(cur) };
+    r
+}
+
+struct Writer<'a> {
+    cur: *mut sys::ecs_meta_cursor_t,
+    ids: &'a mut dyn Resolve,
 }
 
 fn ok(rc: i32, what: &str) -> Result<(), String> {
@@ -428,21 +524,8 @@ fn constant(l: &BTreeMap<String, Ipld>, name: &str) -> Result<i128, String> {
 }
 
 impl Writer<'_> {
-    fn entity(&self, r: &Ipld) -> Result<ecs_entity_t, String> {
-        let Ipld::Map(m) = r else {
-            return Err("not a ref".into());
-        };
-        if let Some(Ipld::Bytes(id)) = m.get("id") {
-            let id: [u8; 16] = id.as_slice().try_into().map_err(|_| "id is not 16 bytes")?;
-            return self
-                .ids
-                .and_then(|ids| ids.get(&id).copied())
-                .ok_or_else(|| format!("no entity has the stable id {}", hex(&id)));
-        }
-        if let Some(Ipld::String(p)) = m.get("path") {
-            return Walk::new(self.w, self.s).resolve(p);
-        }
-        Err("not a ref".into())
+    fn entity(&mut self, r: &Ipld) -> Result<ecs_entity_t, String> {
+        self.ids.entity(r)
     }
 
     fn bytes(&self, b: &[u8]) -> Result<(), String> {
@@ -546,6 +629,13 @@ impl Writer<'_> {
             }
             (Ipld::Map(m), Ipld::List(items)) if m.contains_key("vector") => {
                 self.elements(items, &m["vector"])
+            }
+            (Ipld::Map(m), _)
+                if ["option", "union", "map", "runtime"].iter().any(|k| m.contains_key(*k)) =>
+            {
+                Err("this value is a described type's (an option, union, map or runtime value) inside a type \
+                     Flecs meta describes: describe the enclosing type too"
+                    .into())
             }
             _ => Err("the value does not fit its layout".into()),
         }

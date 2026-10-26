@@ -60,11 +60,12 @@ async def build(test: bool) -> None:
     wasm_opt = os.environ.get("WASM_OPT") or shutil.which("wasm-opt")
     if not wasm_opt:
         raise StepError("find wasm-opt", ["wasm-opt"], 127, "set WASM_OPT or put binaryen's wasm-opt on PATH")
-    # The C ABI exports are behind the ffi feature (off for crates that depend on flecs-snapshot).
-    cargo = ["cargo", "build", "--release", "-p", "flecs-snapshot", "--features", "ffi"]
+    # The C ABI exports are behind the ffi feature (off for crates that depend on flecs-snapshot), and the library
+    # kinds are chosen here: the crate itself is an rlib, so a host that links it gets no second cdylib.
+    cargo = ["cargo", "rustc", "--release", "-p", "flecs-snapshot", "--features", "ffi"]
     async with asyncio.TaskGroup() as g:
-        g.create_task(run("cargo wasm", [*cargo, "--target", WASM_TARGET], 900))
-        g.create_task(run("cargo native", cargo, 900))
+        g.create_task(run("cargo wasm", [*cargo, "--target", WASM_TARGET, "--crate-type", "cdylib"], 900))
+        g.create_task(run("cargo native", [*cargo, "--crate-type", "cdylib,staticlib"], 900))
         g.create_task(run("bun install", ["bun", "install", "--frozen-lockfile"], 300))
     dist = ROOT / "dist"
     shutil.rmtree(dist, ignore_errors=True)
@@ -91,7 +92,11 @@ async def build(test: bool) -> None:
     ext = "dylib" if sys.platform == "darwin" else "so"
     os.environ.setdefault("FLECS_NATIVE", str(target_dir() / "release" / f"libflecs_snapshot.{ext}"))
     async with asyncio.TaskGroup() as g:
-        g.create_task(run("cargo test", ["cargo", "test", "--workspace", "--all-features"], 900))
+        # Not --all-features: flecs-c's `host` links the application's Flecs, which host-check/ supplies.
+        features = "flecs-snapshot/ffi,flecs-describe/glam,flecs-describe/half,flecs-describe/bitflags"
+        g.create_task(run("cargo test", ["cargo", "test", "--workspace", "--features", features], 900))
+        # Host mode against flecs_ecs at the space game's pin (its own workspace, patched to vendor/flecs_ecs_sys).
+        g.create_task(run("host-check", ["cargo", "test", "--manifest-path", "host-check/Cargo.toml"], 900))
         g.create_task(run("bun test", ["bun", "test"], 300))
         g.create_task(run("tsc tests", ["bun", "x", "tsc", "-p", "tsconfig.test.json"], 300))
 

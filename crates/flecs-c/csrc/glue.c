@@ -99,6 +99,9 @@ glue_writer_t *glue_writer_new(const ecs_world_t *world, ecs_entity_t type) {
 
 ecs_meta_cursor_t *glue_writer_cursor(glue_writer_t *w) { return &w->cursor; }
 
+/* The value being written (a default-constructed one until the cursor writes it). */
+const void *glue_writer_ptr(glue_writer_t *w) { return w->value.ptr; }
+
 /* Copies the value onto `entity` as `component` (the type's copy hook runs). */
 void glue_writer_commit(ecs_world_t *world, glue_writer_t *w, ecs_entity_t entity, ecs_id_t component, size_t size) {
     ecs_set_id(world, entity, component, size, w->value.ptr);
@@ -108,6 +111,61 @@ void glue_writer_free(const ecs_world_t *world, glue_writer_t *w) {
     if (!w) return;
     ecs_value_fini(world, &w->value);
     ecs_os_free(w);
+}
+
+/* Flecs's per-table change counters (flecs.c, not in flecs.h): one int32 for the entity column and one per data column,
+ * bumped by set, modified and every query that writes the column. Allocated on first use with every counter at 1. */
+int32_t* flecs_table_get_dirty_state(ecs_world_t *world, ecs_table_t *table);
+
+/* Copies `table`'s change counters into `out` (up to `cap`) and returns how many there are (column count + 1). The
+ * first call for a table starts its counting. */
+int32_t glue_table_dirty(ecs_world_t *world, ecs_table_t *table, int32_t *out, int32_t cap) {
+    if (!table) return 0;
+    int32_t n = ecs_table_column_count(table) + 1;
+    const int32_t *d = flecs_table_get_dirty_state(world, table);
+    for (int32_t i = 0; i < n && i < cap; i++) out[i] = d[i];
+    return n;
+}
+
+/* An opaque type's serializer, with Rust's callbacks (a context pointer first) in place of ecs_serializer_t's. */
+typedef int (*glue_value_t)(void *ctx, ecs_entity_t type, const void *ptr);
+typedef int (*glue_member_t)(void *ctx, const char *name);
+
+typedef struct glue_ser_ctx_t {
+    glue_value_t value;
+    glue_member_t member;
+    void *ctx;
+} glue_ser_ctx_t;
+
+static int glue_ser_value(const ecs_serializer_t *ser, ecs_entity_t type, const void *ptr) {
+    const glue_ser_ctx_t *c = ser->ctx;
+    return c->value(c->ctx, type, ptr);
+}
+
+static int glue_ser_member(const ecs_serializer_t *ser, const char *name) {
+    const glue_ser_ctx_t *c = ser->ctx;
+    return c->member ? c->member(c->ctx, name) : -1;
+}
+
+/* The type an opaque type serialises as (EcsOpaque.as_type), or 0 when `type` is not opaque. */
+ecs_entity_t glue_opaque_as_type(const ecs_world_t *world, ecs_entity_t type) {
+    const EcsOpaque *o = ecs_get(world, type, EcsOpaque);
+    return o ? o->as_type : 0;
+}
+
+/* Runs an opaque type's serialize callback on the value at `ptr`; it calls `value` (and `member`, for a struct-shaped
+ * opaque) for each part. Returns -1 when the type has no serialize callback, else what the callback returns. */
+int glue_opaque_serialize(const ecs_world_t *world, ecs_entity_t type, const void *ptr, glue_value_t value,
+                          glue_member_t member, void *ctx) {
+    const EcsOpaque *o = ecs_get(world, type, EcsOpaque);
+    if (!o || !o->serialize) return -1;
+    glue_ser_ctx_t c = {value, member, ctx};
+    ecs_serializer_t ser = {0};
+    ser.value = glue_ser_value;
+    ser.member = glue_ser_member;
+    ser.world = world;
+    ser.ctx = &c;
+    return o->serialize(&ser, ptr);
 }
 
 /* sizeof and alignof of the structs crates/flecs-c/src/lib.rs mirrors, by index. */
@@ -142,4 +200,204 @@ size_t glue_member_offset(int32_t which) {
     case 4: return offsetof(ecs_member_t, size);
     default: return 0;
     }
+}
+
+/* ---- Described types (crates/flecs-describe) ------------------------------------------------------------------------
+ * Flecs meta and lifecycle hooks registered from a Rust type's description: the builtin primitive ids by kind, named
+ * child types, struct members with explicit offsets (one at a time, so there is no cap of ECS_MEMBER_DESC_CACHE_SIZE),
+ * arrays, vectors, enum and bitmask constants with explicit values, opaque types with a serialize callback, components
+ * with Rust's hooks, and the serializer calls an opaque callback makes. */
+
+/* The builtin type of a primitive kind (EcsBool ... EcsId), or 0. */
+ecs_entity_t glue_describe_primitive(int32_t kind) {
+    switch (kind) {
+    case EcsBool: return ecs_id(ecs_bool_t);
+    case EcsChar: return ecs_id(ecs_char_t);
+    case EcsByte: return ecs_id(ecs_byte_t);
+    case EcsU8: return ecs_id(ecs_u8_t);
+    case EcsU16: return ecs_id(ecs_u16_t);
+    case EcsU32: return ecs_id(ecs_u32_t);
+    case EcsU64: return ecs_id(ecs_u64_t);
+    case EcsI8: return ecs_id(ecs_i8_t);
+    case EcsI16: return ecs_id(ecs_i16_t);
+    case EcsI32: return ecs_id(ecs_i32_t);
+    case EcsI64: return ecs_id(ecs_i64_t);
+    case EcsF32: return ecs_id(ecs_f32_t);
+    case EcsF64: return ecs_id(ecs_f64_t);
+    case EcsUPtr: return ecs_id(ecs_uptr_t);
+    case EcsIPtr: return ecs_id(ecs_iptr_t);
+    case EcsString: return ecs_id(ecs_string_t);
+    case EcsEntity: return ecs_id(ecs_entity_t);
+    case EcsId: return ecs_id(ecs_id_t);
+    default: return 0;
+    }
+}
+
+/* The child of `parent` (0: a root) named exactly `name` (no path parsing), made when there is none. A new one is a
+ * component of `size` and `align` when size > 0, so Flecs treats it as an existing type of that size. */
+ecs_entity_t glue_describe_type(ecs_world_t *world, ecs_entity_t parent, const char *name, int32_t size,
+                                int32_t align) {
+    ecs_entity_t e = ecs_lookup_child(world, parent, name);
+    if (e) return e;
+    e = parent ? ecs_new_w_id(world, ecs_pair(EcsChildOf, parent)) : ecs_new(world);
+    ecs_set_name(world, e, name);
+    if (size > 0) {
+        ecs_component_desc_t d = {0};
+        d.entity = e;
+        d.type.size = size;
+        d.type.alignment = align;
+        if (!ecs_component_init(world, &d)) return 0;
+    }
+    return e;
+}
+
+/* Adds member `name` of `member_type` (an inline array when count > 1) at Rust's offset. use_offset is set for every
+ * member, so Flecs never recomputes C offsets (it would when a member at offset 0 comes without it). */
+int glue_describe_member(ecs_world_t *world, ecs_entity_t type, const char *name, ecs_entity_t member_type,
+                         int32_t count, int32_t offset) {
+    ecs_member_t m = {0};
+    m.name = name;
+    m.type = member_type;
+    m.count = count;
+    m.offset = offset;
+    m.use_offset = true;
+    return ecs_struct_add_member(world, type, &m);
+}
+
+ecs_entity_t glue_describe_array(ecs_world_t *world, ecs_entity_t entity, ecs_entity_t elem, int32_t count) {
+    ecs_array_desc_t d = {0};
+    d.entity = entity;
+    d.type = elem;
+    d.count = count;
+    return ecs_array_init(world, &d);
+}
+
+ecs_entity_t glue_describe_vector(ecs_world_t *world, ecs_entity_t entity, ecs_entity_t elem) {
+    ecs_vector_desc_t d = {0};
+    d.entity = entity;
+    d.type = elem;
+    return ecs_vector_init(world, &d);
+}
+
+/* Makes `entity` an enum over the primitive `underlying`; constants follow with glue_describe_enum_constant. */
+int glue_describe_enum(ecs_world_t *world, ecs_entity_t entity, ecs_entity_t underlying) {
+    if (!ecs_get(world, underlying, EcsPrimitive)) return -1;
+    EcsEnum *e = ecs_ensure(world, entity, EcsEnum);
+    if (!e) return -1;
+    e->underlying_type = underlying;
+    ecs_modified(world, entity, EcsEnum);
+    return 0;
+}
+
+/* A constant child named exactly `name` whose value is always set explicitly as (Constant, underlying): a bare Constant
+ * tag would get Flecs's next value instead of 0. `value` is used for a signed underlying type, `value_unsigned` for an
+ * unsigned one, as ecs_enum_init does. */
+int glue_describe_enum_constant(ecs_world_t *world, ecs_entity_t type, const char *name, int64_t value,
+                                uint64_t value_unsigned) {
+    const EcsEnum *en = ecs_get(world, type, EcsEnum);
+    if (!en) return -1;
+    ecs_entity_t ut = en->underlying_type;
+    const EcsPrimitive *p = ecs_get(world, ut, EcsPrimitive);
+    const ecs_type_info_t *ti = ecs_get_type_info(world, ut);
+    if (!p || !ti) return -1;
+    bool is_unsigned = p->kind == EcsU8 || p->kind == EcsU16 || p->kind == EcsU32 || p->kind == EcsU64 ||
+                       p->kind == EcsUPtr || p->kind == EcsByte;
+    ecs_entity_t c = ecs_new_w_id(world, ecs_pair(EcsChildOf, type));
+    ecs_set_name(world, c, name);
+    void *ptr = ecs_ensure_id(world, c, ecs_pair(EcsConstant, ut), (size_t)ti->size);
+    if (!ptr) return -1;
+    ecs_meta_cursor_t cur = ecs_meta_cursor(world, ut, ptr);
+    int rc = is_unsigned ? ecs_meta_set_uint(&cur, value_unsigned) : ecs_meta_set_int(&cur, value);
+    if (rc) return rc;
+    ecs_modified_id(world, c, ecs_pair(EcsConstant, ut));
+    return 0;
+}
+
+int glue_describe_bitmask(ecs_world_t *world, ecs_entity_t entity) {
+    ecs_add(world, entity, EcsBitmask);
+    return ecs_has(world, entity, EcsBitmask) ? 0 : -1;
+}
+
+int glue_describe_bitmask_constant(ecs_world_t *world, ecs_entity_t type, const char *name, uint32_t value) {
+    ecs_entity_t c = ecs_new_w_id(world, ecs_pair(EcsChildOf, type));
+    ecs_set_name(world, c, name);
+    ecs_set_id(world, c, ecs_pair(EcsConstant, ecs_id(ecs_u32_t)), sizeof(uint32_t), &value);
+    return 0;
+}
+
+/* Makes `type` (a component) opaque: serialised by `serialize` in the shape of `as_type`. No assign callbacks, so a
+ * script or the meta cursor cannot write it. */
+ecs_entity_t glue_describe_opaque(ecs_world_t *world, ecs_entity_t type, ecs_entity_t as_type,
+                                  ecs_meta_serialize_t serialize) {
+    ecs_opaque_desc_t d = {0};
+    d.entity = type;
+    d.type.as_type = as_type;
+    d.type.serialize = serialize;
+    return ecs_opaque_init(world, &d);
+}
+
+/* A component at path `name` (`.`-separated, made when missing) of `size` and `align`, with every lifecycle hook given
+ * explicitly, so Flecs derives none of them. */
+ecs_entity_t glue_describe_component(ecs_world_t *world, const char *name, int32_t size, int32_t align,
+                                     ecs_xtor_t ctor, ecs_xtor_t dtor, ecs_copy_t copy, ecs_move_t move,
+                                     ecs_copy_t copy_ctor, ecs_move_t move_ctor, ecs_move_t ctor_move_dtor,
+                                     ecs_move_t move_dtor) {
+    ecs_entity_desc_t ed = {0};
+    ed.name = name;
+    ed.sep = ".";
+    ecs_entity_t e = ecs_entity_init(world, &ed);
+    if (!e) return 0;
+    ecs_component_desc_t d = {0};
+    d.entity = e;
+    d.type.size = size;
+    d.type.alignment = align;
+    if (!ecs_component_init(world, &d)) return 0;
+    ecs_type_hooks_t h = {0};
+    h.ctor = ctor;
+    h.dtor = dtor;
+    h.copy = copy;
+    h.move = move;
+    h.copy_ctor = copy_ctor;
+    h.move_ctor = move_ctor;
+    h.ctor_move_dtor = ctor_move_dtor;
+    h.move_dtor = move_dtor;
+    ecs_set_hooks_id(world, e, &h);
+    return e;
+}
+
+int glue_describe_ser_value(const ecs_serializer_t *ser, ecs_entity_t type, const void *ptr) {
+    return ser->value(ser, type, ptr);
+}
+
+/* -1 when the serializer takes no member names (it is not serialising a struct-shaped opaque). */
+int glue_describe_ser_member(const ecs_serializer_t *ser, const char *name) {
+    return ser->member ? ser->member(ser, name) : -1;
+}
+
+const ecs_world_t *glue_describe_ser_world(const ecs_serializer_t *ser) { return ser->world; }
+
+/* ---- Direct writes (restore) -------------------------------------------------------------------------------------- */
+
+/* A meta cursor over the live value at `ptr` of `type`, on the heap (ecs_meta_cursor_t is returned by value). */
+ecs_meta_cursor_t *glue_cursor_new(const ecs_world_t *world, ecs_entity_t type, void *ptr) {
+    ecs_meta_cursor_t *c = ecs_os_calloc_t(ecs_meta_cursor_t);
+    if (!c) return NULL;
+    *c = ecs_meta_cursor(world, type, ptr);
+    return c;
+}
+
+void glue_cursor_free(ecs_meta_cursor_t *c) { ecs_os_free(c); }
+
+/* Replaces the Flecs string at `slot` (freed) with a copy of `len` bytes at `s`, or NULL when `s` is NULL. */
+int glue_set_string(char **slot, const char *s, int32_t len) {
+    char *n = NULL;
+    if (s) {
+        n = ecs_os_malloc(len + 1);
+        if (!n) return -1;
+        ecs_os_memcpy(n, s, len);
+        n[len] = 0;
+    }
+    ecs_os_free(*slot);
+    *slot = n;
+    return 0;
 }

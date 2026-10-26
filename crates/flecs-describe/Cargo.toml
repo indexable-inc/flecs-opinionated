@@ -1,0 +1,27 @@
+[package]
+name = "flecs-describe"
+description = "Describe Rust types (#[derive(Describe)]) to flecs-snapshot: one description gives the layout record, the snapshot value and the Flecs meta (SPEC.md, \"Described types\")."
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+
+[features]
+# Link the host application's Flecs (forwards to flecs-c/host).
+host = ["flecs-c/host"]
+glam = ["dep:glam"]
+half = ["dep:half"]
+bitflags = ["dep:bitflags"]
+# flecs_ecs brings its own Flecs (flecs_ecs_sys), so it implies `host`: one Flecs per process.
+flecs_ecs = ["dep:flecs_ecs", "host"]
+
+[dependencies]
+flecs-c = { path = "../flecs-c" }
+flecs-snapshot = { path = "../flecs-snapshot" }
+flecs-describe-derive = { path = "../flecs-describe-derive" }
+ipld-core = "0.4"
+serde_ipld_dagcbor = "0.7"
+glam = { version = "0.30", optional = true }
+half = { version = "2", optional = true }
+bitflags = { version = "2", optional = true }
+flecs_ecs = { git = "https://github.com/Indra-db/Flecs-Rust", rev = "bf956db99b69d41ee142c9d52054911af28d7e93", optional = true }

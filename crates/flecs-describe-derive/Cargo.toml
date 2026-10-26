@@ -1,0 +1,15 @@
+[package]
+name = "flecs-describe-derive"
+description = "#[derive(Describe)] for flecs-describe."
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

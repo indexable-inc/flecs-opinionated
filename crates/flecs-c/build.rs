@@ -28,6 +28,32 @@ fn main() {
     );
     let target = env::var("TARGET").expect("TARGET");
     let mut b = cc::Build::new();
+    if env::var_os("CARGO_FEATURE_HOST").is_some() {
+        // Host mode: only the glue, against the host's Flecs (flecs_ecs_sys, which this crate depends on, so the
+        // linker sees glue before Flecs). The defines that change Flecs's struct layouts must match the host's
+        // build: flecs_ecs_sys compiles FLECS_DEBUG unless the profile is release (its build.rs), and FLECS_CPP.
+        let release = env::var("PROFILE").is_ok_and(|p| p == "release");
+        b.file(root.join("csrc/glue.c"))
+            .include(&flecs)
+            .define("FLECS_CUSTOM_BUILD", None)
+            .define("FLECS_CPP", None)
+            .define("FLECS_META", None)
+            .define("FLECS_SCRIPT", None)
+            .define("FLECS_LOG", None)
+            .define("GLUE_HOST", None)
+            .opt_level(2)
+            .debug(false)
+            .warnings(false)
+            .flag("-std=gnu99");
+        if release {
+            b.define("NDEBUG", None).define("FLECS_NDEBUG", None);
+        } else {
+            b.define("FLECS_DEBUG", None);
+        }
+        b.compile("flecs_glue");
+        println!("cargo:rerun-if-changed={}", root.join("csrc").display());
+        return;
+    }
     b.file(flecs.join("flecs.c"))
         .file(root.join("csrc/glue.c"))
         .include(&flecs)

@@ -1,11 +1,20 @@
 [package]
 name = "flecs-c"
-description = "Flecs's amalgamated C (vendor/flecs submodule) built with cc for the host and for wasm32-unknown-unknown, plus the declarations Rust calls it through."
+description = "Flecs's amalgamated C (vendor/flecs) built with cc for the host and for wasm32-unknown-unknown, plus the declarations Rust calls it through. With `host`, links the application's Flecs (flecs_ecs_sys) instead."
 version = "0.1.0"
 edition = "2024"
 publish = false
 license = "MIT"
 links = "flecs"
+
+[features]
+# Link the host application's Flecs instead of compiling one: only csrc/glue.c is compiled, and the ecs_* symbols come
+# from flecs_ecs_sys, so the process has one Flecs (SPEC.md, "Host worlds"). The rev is the space game's pin; the game
+# patches it to its vendored copy, host-check/ to vendor/flecs_ecs_sys.
+host = ["dep:flecs_ecs_sys"]
+
+[dependencies]
+flecs_ecs_sys = { git = "https://github.com/Indra-db/Flecs-Rust", rev = "bf956db99b69d41ee142c9d52054911af28d7e93", optional = true }
 
 [build-dependencies]
 cc = "1"

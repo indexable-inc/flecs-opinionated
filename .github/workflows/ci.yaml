@@ -38,7 +38,9 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets -- -D warnings
-          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo clippy --workspace --all-targets --features flecs-snapshot/ffi,flecs-describe/glam,flecs-describe/half,flecs-describe/bitflags -- -D warnings
+          cargo clippy --manifest-path host-check/Cargo.toml --all-targets -- -D warnings
+          cargo fmt --manifest-path host-check/Cargo.toml -- --check
           cargo clippy -p flecs-snapshot --target wasm32-unknown-unknown --features ffi -- -D warnings
           uv run ruff check
           uv run ruff format --check

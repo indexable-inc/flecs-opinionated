@@ -1,7 +1,9 @@
 # Format
 
-Version 1. This file describes what the library writes, what a reader must check, and the parts that are designed
-but not built yet (merging, history, permissions, validation). Sections marked **reserved** describe fields that are
+Version 2. This file describes what the library writes, what a reader must check, and the parts that are designed
+but not built yet (merging, history, permissions, validation). The library reads two kinds of world: a **script
+world** it owns, filled by Flecs scripts (most of this file), and a **host world** an application owns and passes in
+("Host worlds"), such as a game's live state. Sections marked **reserved** describe fields that are
 in the format now but are not checked or acted on.
 
 ## Encoding
@@ -12,8 +14,8 @@ canonical form of RFC 8949 §4.2.1 plus IPLD's stricter rules:
 - map keys are strings, sorted by length first and then bytewise;
 - integers use the shortest form;
 - floats are always 64-bit; NaN and the infinities are not allowed, so writing one is an error that names the
-  component and member. `-0.0` is kept as written (DAG-CBOR allows it, and it is a different float from `0.0`), so
-  `-0.0` and `0.0` give different bytes;
+  component and member. `-0.0` is written as `0.0` (the bytes of `0.0`), and a decoder refuses the bytes of `-0.0`,
+  as `serde_ipld_dagcbor` does; a value read back from bytes is `0.0`;
 - the only tag is 42 (a CID link);
 - no indefinite lengths.
 
@@ -24,8 +26,10 @@ rounded parser. A test compares native and wasm output byte for byte.
 A block's CID is CIDv1 with multihash sha2-256 (0x12). Entity, root and blob chunk-list blocks use codec dag-cbor
 (0x71); blob chunks are raw (0x55).
 
-Integer literals in scripts that do not fit 64 bits are an error on every host: the wasm libc's `strtoull` and
-`strtoll` saturate and set `ERANGE`, as native libc does, so Flecs refuses the same literals natively and in wasm.
+Integer literals in scripts that do not fit 64 bits saturate (at u64::MAX, or i64's bounds) on every host: the
+pinned Flecs (`vendor/flecs/SOURCE.md`) parses them with `strtoull`/`strtoll` and does not check `ERANGE`, and the
+wasm libc saturates as native libc does, so native and wasm agree. A later Flecs that refuses them makes this an
+error everywhere.
 
 ## Values
 
@@ -33,7 +37,7 @@ Integer literals in scripts that do not fit 64 bits are an error on every host: 
 |---|---|
 | bool | bool |
 | char, u8 to u64, i8 to i64, byte | integer |
-| uptr, iptr | refused: their width is the host's pointer width, which differs between native and wasm |
+| uptr, iptr | integer. The layout says `"uptr"`/`"iptr"` and the value is read at the host's pointer width but always written as a CBOR integer in the u64/i64 range, so native and wasm encode the same value the same way. Restoring a value that does not fit the host's pointer width is an error |
 | `sync.Bytes` (a `vector<u8>`) | a byte string, inline (CBOR major type 2) |
 | `sync.Blob` (a `vector<u8>`) | a link (tag 42) to the blob's blocks; see "Blobs" |
 | f32, f64 | float (an f32 is widened to f64 exactly) |
@@ -45,7 +49,13 @@ Integer literals in scripts that do not fit 64 bits are an error on every host: 
 | struct | a map from member name to value |
 | array, or an inline member array (`count > 1`) | an array |
 | vector | an array |
-| opaque, map, anything else | an error that names the type |
+| opaque (a type serialised by callbacks, such as a Rust `String` or `Vec<T>` registered by flecs_ecs) | the value of its `as_type`, read through the type's `serialize` callback: a `String` is text, a `Vec<T>` an array. Its layout is the `as_type`'s layout. Written back through the meta cursor, which calls the type's assign callbacks |
+| f16, bf16 (described types only, below) | float, widened exactly. Restoring a float that the type cannot hold exactly is an error |
+| option (described) | `[]` for none, `[v]` for some: a list, so `Option<Option<T>>` and an optional null ref stay distinct |
+| union (described; a Rust enum with data) | a map with exactly one key, the variant's name, whose value is the variant's payload, or null for a variant with none |
+| map (described; a Rust `HashMap` or `BTreeMap`) | an array of `[key, value]`, sorted by the key's DAG-CBOR encoding, keys unique, so the order never depends on the map's iteration order |
+| runtime (described) | null: the type holds only process-local state (a physics body handle, a GPU buffer, a cache), so the part is saved but its value is not; a restore leaves the default the type's constructor makes, for its system to rebuild |
+| a Flecs map, anything else | an error that names the type |
 | a component marked `DontFragment` | an error: its values live outside the entity's type, where the walk does not read them yet |
 
 Errors name the component and the member path inside it, such as `component Card: member pos.x: ...` or
@@ -88,6 +98,9 @@ snapshot that holds both.
 
 Pair targets, entity-typed fields and `isa` lists refer to entities by this id.
 
+In a host world (see "Host worlds") the host names the id component and gives every saved entity its id; the
+library never derives one there, and never writes `#n` for a saved entity.
+
 Not built yet: entities created at runtime by an actor rather than by a script. They will use
 `SHA-256("flecs-entity-id/1" 0x00 || actor key || 0x00 || hlc)[0..16]`, which is unique per actor and per clock
 tick.
@@ -96,27 +109,74 @@ tick.
 
 Each component and pair type a snapshot uses gets one layout record, keyed by the type's path:
 
-    {"layout": L, "merge": rule | null, "sync": mode, "writable_by": ref | null, "validated_by": ref | null,
-     "hash": bytes8}
+    {"base": path, "version": uint, "layout": L, "merge": rule | null, "sync": mode, "writable_by": ref | null,
+     "validated_by": ref | null, "hash": bytes8}
+
+`base` and `version` come from the type's path: a last segment ending in `V` and a decimal number that does not
+start with `0` (`FooV2`, `ship.HullV12`) has base `Foo` (`ship.Hull`) and that version; any other path is its own
+base at version 1. `FooV1` is refused, since it would be a second name for version 1 of `Foo`. Versions of a base
+are the steps a migration chain walks ("Migrations").
 
 `hash` is the first 8 bytes of SHA-256 over the DAG-CBOR of the record without `hash`. Every component value carries
 the hash of its type's record, so a value can never be read with the wrong layout.
 
 `L` is one of:
 
-- a primitive name: `"bool"`, `"u8"` … `"f64"`, `"string"`, `"entity"`, `"id"`, `"bytes"`, `"blob"` and so on
-  (`"uptr"` and `"iptr"` are refused);
+- a primitive name: `"bool"`, `"u8"` … `"f64"`, `"uptr"`, `"iptr"`, `"string"`, `"entity"`, `"id"`, `"bytes"`,
+  `"blob"` and so on (an opaque type has its `as_type`'s layout);
 - `{"struct": path | null, "members": [[name, L, rule | null], ...]}`;
 - `{"enum": path | null, "underlying": L, "constants": [[name, int], ...]}`;
 - `{"bitmask": path | null, "constants": [[name, uint], ...]}`;
 - `{"array": L, "count": n}`;
-- `{"vector": L}`.
+- `{"vector": L}`;
+- `{"option": L}`;
+- `{"union": path | null, "variants": [[name, L | null], ...]}`, a variant's payload being a struct (a Rust tuple
+  variant's members are named `0`, `1`, ...) or null;
+- `{"map": [K, V]}`;
+- `{"runtime": path}`.
+
+`"f16"`, `"bf16"` and the last four kinds come only from described types ("Described types"); a Flecs-only world
+never has them. A Rust tuple or tuple struct is a struct whose members are named `0`, `1`, ...
 
 Constants and members are listed in declaration order. Renaming a member, reordering members, changing a type,
-changing a rule or changing the sync mode all change the hash.
+changing a rule or changing the sync mode all change the hash. A layout record says everything needed to read a
+value written with it, so a value whose type no longer exists in any world can still be read, checked and migrated
+from its record alone.
 
 `merge` is the whole value's rule for a non-struct type and null for a struct. A member's rule slot follows "Rules"
 below: inside a value one rule merges whole, every rule slot is null. A reader refuses a record that breaks this.
+
+### Described types
+
+Flecs's reflection has no sum types, options, maps or half floats, and a Rust type's field order is not its memory
+order. A host describes such types itself: a **described type** is a component (or any type a member uses) whose
+type entity has `sync.Described`, a pointer to a host-process record holding
+
+- the layout `L`, in the vocabulary above, with a struct member's rule slot holding the rule declared on that member
+  or null;
+- a read function from a value in memory to its value (as in "Values"), given a function that turns an entity into a
+  ref;
+- a write function from a checked value to memory, over a value the type's constructor made, given a function that
+  turns a ref into an entity.
+
+For a described type the library uses that layout and those functions instead of Flecs's reflection, so it can read
+and write every Rust type: the record, the value and the memory come from one description. The rule slots are then
+filled exactly as for a Flecs struct (a member's rule, else the type's `(Merge, rule)`, else nested structs null and
+everything else the default; inside a covered value, all null), so a described type's record is the record a Flecs
+struct of the same shape gets. The crate `flecs-describe` (`#[derive(Describe)]`) writes the description from the
+Rust type, registers the same shape as Flecs meta (a struct with Rust's real member offsets where Flecs can express
+it, an opaque type serialised from the description where it cannot) and checks any Flecs meta the type already has
+against it, so a type, its Flecs meta and its layout record cannot disagree. A host's layout lock is the list of its
+records' hashes.
+
+`#[derive(Describe)]` takes, under `#[describe(...)]`: on the type `name = "Path"` and `runtime` (the whole type is
+process-local: layout `{"runtime": name}`, value null, restored as `Default`); on a field `merge = "Rule"`,
+`runtime`, `with = path` (a module with `layout`, `read` and `from_value`) and `name = "member"`; on a variant
+`name = "Variant"`. With `runtime` every Rust type can be described; the space game's 2797 component types (738
+tags, 2059 with data) all are, 56 of them with a `runtime` part.
+
+`sync.Described` holds a pointer, so it means something only in the process that set it; it is never part of a
+snapshot, and a script world never has it.
 
 ## Entity record
 
@@ -145,7 +205,7 @@ below: inside a value one rule merges whole, every rule slot is null. A reader r
 
 ## Document
 
-    {"version": 1, "layouts": {path: record}, "entities": [record + {"path": text, "parent": index | null}]}
+    {"version": 2, "layouts": {path: record}, "entities": [record + {"path": text, "parent": index | null}]}
 
 Entities are in depth-first order from each root in the order the caller listed them. Children come in declared
 order when the parent has `OrderedChildren`, and otherwise sorted by segment (bytewise). Flecs's own child order
@@ -157,10 +217,11 @@ Ephemeral parts (see "Sync modes") and their layouts are never in a document.
 
 ## Blocks
 
-Each entity is one block: its record plus `"children": [[segment, CID], ...]`, in the child order above. The ChildOf
+Each entity is one block: its record plus `"children"`, which is `[[segment, CID], ...]` in the child order above,
+or `{"mst": CID}` past 4096 children ("Large child sets"). The ChildOf
 tree is the Merkle tree. The world root block is:
 
-    {"version": 1, "layouts": {path: record}, "roots": [[path, CID], ...]}
+    {"version": 2, "layouts": {path: record}, "roots": [[path, CID], ...]}
 
 The library writes a block set as a CARv1 file: the header `{"roots": [root CID], "version": 1}`, then the root block,
 then the entity blocks depth first, then the blob blocks in the order the walk reached them, each written once.
@@ -193,25 +254,44 @@ reported as `changed`. Every block read is checked against its CID.
 
 ### Large child sets
 
-The child list is stored inline. Its CID depends only on its contents, not on the order the children were inserted
-(the sort is by segment), so the format is already history-independent. The cost is that each change to one child
-rewrites the parent's whole list. A parent with more than 4096 children is refused for now.
+Up to 4096 children, the child list is inline. Its CID depends only on its contents, not on the order the children
+were inserted (the sort is by segment), so it is history-independent. Past 4096 the list is `{"mst": CID}`, the root of
+a Merkle Search Tree in the atproto layout, keyed by the segment's UTF-8 bytes with the child's CID as the value. A
+parent with `OrderedChildren` and more than 4096 children is refused, since an MST is ordered by key.
 
-The plan is to replace the inline list, past that threshold, with a Merkle Search Tree in the atproto layout
-(`{"mst": CID}` in place of the list; `@atcute/mst` on the JS side). In an MST a node's position comes from hashing
-its key, which keeps it history-independent while making one insert cost O(log n) blocks. I found no Rust MST crate I
-could use:
+The MST (as atproto's repository tree, with this library's keys and values):
 
-- atrium-repo needs tokio;
-- rsky-repo pulls in secp256k1 and much of a PDS;
-- `merkle-search-tree` is not IPLD-shaped.
+- A key's depth is the number of leading zero bits of SHA-256(key), divided by 2 and rounded down (fanout 4).
+- A node is `{"l": CID | null, "e": [{"p": uint, "k": bytes, "v": CID, "t": CID | null}, ...]}`: `l` is the subtree of
+  keys below the first entry, each entry's `t` the subtree between it and the next. `p` is how many leading bytes the
+  key shares with the previous entry's key in the node (0 for the first) and `k` the rest.
+- All entries of a node have the same depth, and its subtrees are one depth lower. Empty nodes between two levels are
+  kept so a link never skips a level; the root is the node at the highest depth that holds an entry, and an empty
+  tree is one node with `"e": []`.
+- Keys are strictly increasing bytewise across the whole tree.
+- Readers check every node: keys in order, every key at its node's depth, `p` within the previous key, no empty node
+  except the root of an empty tree or between levels.
 
-So that part will be written here.
+The shape depends only on the keys, so the tree is history-independent, and one insert rewrites O(log n) blocks. No
+Rust MST crate fitted (atrium-repo needs tokio, rsky-repo pulls in secp256k1 and much of a PDS, `merkle-search-tree`
+is not IPLD-shaped), so `crates/flecs-snapshot/src/mst.rs` implements it.
 
 ### Incremental hashing
 
-Not built. Every snapshot walks and hashes the whole subtree; hashing is cheap next to the walk. The plan is to cache
-each entity's CID and recompute only entities whose tables changed (Flecs table versions), plus their ancestors.
+`Host::blocks` caches each saved entity's block and CID, and on the next call rebuilds only the entities whose Flecs
+table changed: an entity moved to another table, or its table's per-column change counters (`dirty_state`, which
+Flecs bumps on `set`, `modified` and every query that writes the column) moved since the last call. The MST over the
+entities is then rebuilt from the cached CIDs, which costs hashing about n/4 small nodes. A write that bypasses all of
+those (a raw pointer from `get_mut` with no `modified`) is not seen; `Host::blocks_full` rebuilds everything, and a
+test compares the two. Script worlds always rebuild.
+
+A changed table does not rebuild its entities' records outright. When every component of an entity is plain data
+(Flecs meta of numbers, bools, entities, enums and bitmasks, and arrays and structs of those; no strings, vectors,
+opaque or described types), the cache keeps the components' raw bytes, and an entity whose table and bytes are
+unchanged keeps its block. Entities with a component that is not plain data, or whose bytes changed, are
+re-encoded. An entity member is compared by its local id, so renaming or re-parenting the entity it points at
+(which changes a `{"path"}` ref) is seen only by `blocks_full`. `Host::blocks_new` returns only the blocks this Host has not returned since its cache
+was filled, for a store that kept every earlier result.
 
 ## Versioning
 
@@ -223,10 +303,190 @@ each entity's CID and recompute only entities whose tables changed (Flecs table 
   this spec lists, layouts must be well formed (rule slots as in "Rules", known primitive names, hash recomputed),
   and every value must fit its layout. Anything else is refused, because an unknown key may change what the record
   means. `check::document` in Rust and `checkDocument` in TS do this; the TS reader checks the layout hashes' shape
-  and leaves recomputing them to the Rust reader. Strict readers mean no key can be added within version 1.
+  and leaves recomputing them to the Rust reader. Strict readers mean no key can be added within a version.
 - Anything else needs a new version.
-- Migrations are explicit code, written for one (old layout hash → new layout hash) pair. Nothing converts
-  implicitly.
+- Version 2 added `base` and `version` to layout records, `uptr`, `iptr` and opaque types, described types (`f16`,
+  `bf16`, option, union, map, runtime), the MST child list and host documents. Readers of this version refuse version 1; nothing stored version 1 data outside tests.
+- A component's layout never changes under the same type. A changed type is a new one, `FooV2`, with a migration from
+  `Foo`, and a value is only ever read with the record it was written with ("Migrations"). Nothing converts
+  implicitly: a value converts only along a migration the reader was given.
+
+## Host worlds
+
+A host world is a Flecs world an application owns, such as a game's live state, passed to the library as an
+`ecs_world_t*`. The library links the application's Flecs (crate `flecs-c` with the `host` feature depends on the
+host's `flecs_ecs_sys` instead of compiling its own), so the process has one Flecs. The library does not install its
+OS API, change the lookup path, run scripts or derive ids there. It adds the `sync` module (the script in "The sync
+module") if the world has none, so the host can put `(Sync, Ephemeral)` and merge rules on its own types.
+
+The host names two things:
+
+- the **id component**, a struct of exactly `{hi: u64, lo: u64}` (the game's `Uid`), whose 16 big-endian bytes are
+  the entity's stable id;
+- the **select tag** (the game's `Persist`): the saved entities are the entities that have it, disabled ones too,
+  never prefabs; or only those in one subtree.
+
+Every saved entity must have an id, and two saved entities with one id are refused.
+
+### Host record
+
+    {"id": bytes16, "name": text | null, "parent": ref | null,
+     "tags": [ref], "pairs": [...], "components": {...}, "isa": [ref]}
+
+`tags`, `pairs` and `components` are as in "Entity record". `isa` lists the entity's direct bases, sorted by their
+ref's DAG-CBOR. There is no `inherited`: an inherited part belongs to the prefab, which is authored, not saved. The
+id component, the select tag, the name (`Identifier`) and `ChildOf` are not parts; `ChildOf`'s target is `parent`
+and the name is `name`. Ephemeral parts are left out.
+
+Refs in a host record:
+
+- a saved entity: `{"id"}`;
+- an entity outside the selection with an id: `{"id"}`, only when the caller allows outside refs (`Outside::ById`);
+  refused otherwise;
+- anything else (prefabs, components, modules, the host's named entities): `{"path"}`, refused when a segment is
+  unnamed (`#n`), since that numbering is local to one world.
+
+Also refused, naming the entity and part: a `DontFragment` part, a disabled `CanToggle` component, `Parent`
+storage, a wildcard id, two targets of an exclusive relationship.
+
+### Host document
+
+    {"version": 2, "ids": path, "layouts": {path: record}, "entities": [host record]}
+
+`ids` is the id component's path. Entities are sorted by id.
+
+### Host blocks
+
+Each entity is one block, its host record. The root block is
+
+    {"version": 2, "ids": path, "layouts": {path: record}, "entities": CID}
+
+where `entities` is the root of an MST keyed by the 16 id bytes with each entity's block CID as the value. A change to
+one entity rewrites its block and O(log n) MST nodes. The root CID is the state hash.
+
+### Restore
+
+`Host::restore` creates a document's entities in the world, all or nothing:
+
+1. Check the document strictly (as "Versioning"), then migrate every value whose layout the world does not have
+   (below). A layout with no migration to a live type is refused. A value whose layout the world has is checked
+   against it straight from the document's bytes (a dry run of the write), with no value tree; every value is
+   checked before the world changes.
+2. Refuse when the world is deferred (in a system or `defer_begin`), and when an id is already held by a live entity,
+   unless the caller remaps ids (`Ids::Remint`, whose function gives each saved id a fresh one; refs to saved entities
+   follow the new ids).
+3. Create every entity with `ecs_new` and set its id. Nothing is placed or moved; restore makes new entities.
+4. Set parents (parents before children, refusing a cycle or a depth past `FLECS_DAG_DEPTH_MAX`) and names (refusing a
+   name its parent already has).
+5. Add `IsA` bases (copying their `Override` parts), then pairs, tags and components, all in one deferred batch so
+   each entity moves table once; then write each value in place (from the document's bytes, or the migrated value)
+   and mark it modified; then remove any part a base copied that the record does not list.
+6. Add the select tag last, so observers of it see whole entities.
+7. Optionally read every entity back and compare it with the record (`verify`).
+
+On any error every entity made so far is deleted and the world is as it was, except for ids Flecs recycles.
+
+### Live migration
+
+`Host::migrate_live` moves every value of one type to another along a migration chain, in place: each owner of
+`Foo`, `(Foo, *)` or `(rel, Foo)`, prefabs included, gets `FooV2` (or `(FooV2, *)`, `(rel, FooV2)`) with the
+converted value and loses `Foo`. It is all or nothing: every value is read and converted before anything is
+written, an entity that already has `FooV2` is refused, and a failed write removes the `FooV2` parts it added. The
+host runs it after a patch adds `FooV2`, before any system reads it.
+
+## Migrations
+
+A migration is data: an edge from one layout record to another, keyed by (old hash, new hash), holding both records
+and a conversion. A set of edges (`Migrations`) is passed to `restore`, `migrate_live` and the readers; a chain is any
+path of edges (`Foo` to `FooV2` to `FooV3`), found by breadth-first search from the old hash. When a saved record has
+no live type, the target is the live type reachable from it with the highest version; two reachable live types of the
+same base and version are refused. An edge's conversion is one of:
+
+- **by name** (the default), with an optional `renamed_from` map from a new member path to the old one (`"pos.x"`):
+  - a struct member with the same name (or the old name `renamed_from` gives) moves, converted by its own layouts;
+  - a number widens: unsigned to a wider unsigned or signed type, signed to a wider signed type, `f32` to `f64`, an
+    integer of up to 32 bits to `f64`, `uptr` and `u64` (and `iptr` and `i64`) to each other; any other numeric change,
+    narrowing included, is an error;
+  - an enum or bitmask converts by constant name; a constant the new type lacks is an error;
+  - arrays and vectors convert element by element; an array converts to a vector, or to an array of the same count;
+  - an option converts its value; a value converts to an option of its type (some); an option to its value type is
+    an error for none;
+  - a union converts by variant name (a variant's payload by these rules); a value in a variant the new type lacks
+    is an error;
+  - a map converts its keys and values, and is re-sorted; two keys that convert to one are an error;
+  - `f16` and `bf16` widen to `f32` and `f64`; a runtime value stays null;
+  - a member only the new layout has gets its default: the member of the value the new type's constructor makes when
+    a live world has the type, zero (false, empty, null) otherwise;
+  - a member only the old layout has is dropped and reported (`Report::dropped`);
+  - anything else (a struct to a number, a string to an enum) is an error, never an abort;
+- **custom**, a function from the old value to the new one, for anything by-name cannot express.
+
+Edges are stored as DAG-CBOR (`Migrations::to_cbor`, `from_cbor`: `{"version": 2, "edges": [{"from": record, "to":
+record, "renamed_from": {new: old}}]}`; custom edges are code and are registered at run time).
+
+## API
+
+The Rust API a host calls (crate `flecs-snapshot`, feature `host`; `crates/flecs-snapshot/src/host.rs`,
+`migrate.rs`):
+
+    pub struct Host { /* one world, its id component and select tag, and the block cache */ }
+    impl Host {
+        /// `world` lives as long as the Host. `ids` and `select` are entity paths.
+        pub unsafe fn new(world: *mut ecs_world_t, ids: &str, select: &str) -> Result<Host, String>;
+        pub fn document(&self, sel: &Selection, opts: &Encode) -> Result<Ipld, String>;
+        pub fn encode(&self, sel: &Selection, opts: &Encode) -> Result<Vec<u8>, String>; // DAG-CBOR document
+        pub fn blocks(&mut self, sel: &Selection, opts: &Encode) -> Result<Blocks, String>; // incremental
+        pub fn blocks_new(&mut self, sel: &Selection, opts: &Encode) -> Result<Blocks, String>; // only unseen blocks
+        pub fn blocks_full(&mut self, sel: &Selection, opts: &Encode) -> Result<Blocks, String>;
+        pub fn restore(&mut self, doc: &[u8], m: &Migrations, opts: &mut Restore) -> Result<Restored, String>;
+        pub fn migrate_live(&mut self, m: &Migrations, from: &str, to: &str) -> Result<Report, String>;
+        pub fn layout_record(&self, ty: &str) -> Result<Ipld, String>;
+    }
+    pub enum Selection { Tagged, Subtree(ecs_entity_t) }
+    pub struct Encode { pub outside: Outside }            // Outside::{Refuse, ById}
+    pub struct Restore { pub ids: Ids, pub verify: bool } // Ids::{Keep, Remint(Box<dyn FnMut([u8; 16]) -> [u8; 16]>)}
+    pub struct Restored { pub entities: Vec<([u8; 16], ecs_entity_t)>, pub report: Report }
+    pub struct Report { pub dropped: Vec<String>, pub migrated: Vec<String> }
+    /// What differs between two host roots, by entity id (Kind::{Added, Removed, Changed}); entity blocks are not
+    /// fetched.
+    pub fn diff(s: &dyn BlockStore, a: &Cid, b: &Cid) -> Result<Vec<([u8; 16], Kind)>, String>;
+
+    // Described types (SPEC.md, "Described types").
+    pub trait Refs { fn reference(&mut self, e: ecs_entity_t) -> Result<Ipld, String>; }
+    pub trait Resolve { fn entity(&mut self, r: &Ipld) -> Result<ecs_entity_t, String>; }
+    pub type ReadFn = unsafe fn(ptr: *const u8, refs: &mut dyn Refs) -> Result<Ipld, String>;
+    pub type WriteFn = unsafe fn(v: &Ipld, ptr: *mut u8, ids: &mut dyn Resolve) -> Result<(), String>;
+    pub struct Described { pub layout: Ipld, pub read: ReadFn, pub write: WriteFn }
+    pub unsafe fn describe(world: *mut ecs_world_t, ty: ecs_entity_t, d: Described) -> Result<(), String>;
+    pub unsafe fn described(world: *const ecs_world_t, ty: ecs_entity_t) -> Option<&'static Described>;
+
+    pub struct Migrations { /* edges keyed by (old hash, new hash) */ }
+    impl Migrations {
+        pub fn by_name(&mut self, from: Ipld, to: Ipld, renamed_from: &[(&str, &str)]) -> Result<(), String>;
+        pub fn custom(&mut self, from: Ipld, to: Ipld, f: Box<dyn Fn(&Ipld) -> Result<Ipld, String>>) -> Result<(), String>;
+        pub fn convert(&self, from: &[u8; 8], to: &[u8; 8], v: &Ipld, report: &mut Report) -> Result<Ipld, String>;
+        pub fn to_cbor(&self) -> Vec<u8>;
+        pub fn from_cbor(b: &[u8]) -> Result<Migrations, String>;
+    }
+
+The crate `flecs-describe` (features `flecs_ecs`, `glam`, `half`, `bitflags`):
+
+    pub trait Describe: Sized + 'static {
+        fn type_name() -> String;
+        fn layout() -> Ipld;
+        fn read(&self, refs: &mut dyn Refs) -> Result<Ipld, String>;
+        fn from_value(v: &Ipld, ids: &mut dyn Resolve) -> Result<Self, String>;
+        fn flecs() -> Flecs; // what Flecs's reflection can hold; Flecs::Opaque by default
+    }
+    #[derive(Describe)]
+    /// Describes `component` as `T` and registers (or checks) its Flecs meta.
+    pub unsafe fn register<T: Describe>(world: *mut ecs_world_t, component: ecs_entity_t) -> Result<(), String>;
+    /// Makes a component at `path` with Rust's lifecycle hooks, then registers `T` on it.
+    pub unsafe fn component<T: Describe + Default + Clone>(world: *mut ecs_world_t, path: &str)
+        -> Result<ecs_entity_t, String>;
+
+Every error is a `String` naming the entity (by id), the part and the member path. Nothing panics or aborts on bad
+input: the host's Flecs build may not have soft asserts, so the library checks each argument before calling Flecs.
 
 ## The sync module
 
@@ -237,6 +497,7 @@ on the lookup path, so scripts write `(Merge, Text)` without the prefix. It hold
 - the `Merge` relationship and its rules;
 - the `Sync` relationship and its modes;
 - the `Bytes` and `Blob` types;
+- the `Described` component (a host-process pointer to a type's description; "Described types");
 - the reserved permission and validation vocabulary below.
 
 ## Merging
@@ -394,9 +655,11 @@ taking the union of their change sets. The new heads are the changes nobody poin
 - **History compaction.** Can a peer drop old changes once every known peer has them? That needs a stable snapshot to
   restart from, and a rule for what a late peer with older changes does.
 - **Tombstones.** How long does a deleted entity's id stay reserved? Forever is safe but grows without bound.
-- **Merging across layouts.** Two changes to the same component under different layout hashes do not merge. The
-  peer that knows only one layout refuses the other. A peer that knows both applies an explicit migration first.
-  Nothing is merged field by field across layouts by name.
+- **Merging across layouts.** Two changes to the same component under different layout hashes do not merge
+  directly. A peer that knows only one layout refuses the other. A peer that has a migration between them
+  ("Migrations", by name or custom) converts the older value first, then merges under one layout; the migration is
+  data both peers can hold, so they convert the same way. Open: whether a merge result must be stored under the
+  newer layout only.
 - **Clock.** HLC skew bounds, and whether a peer refuses changes too far in the future.
 
 ## History

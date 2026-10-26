@@ -7,13 +7,17 @@ publish = false
 license = "MIT"
 
 [lib]
-crate-type = ["rlib", "cdylib", "staticlib"]
+# rlib only, so a crate that depends on this one builds no C library; build.py makes the cdylib and staticlib with
+# `cargo rustc --crate-type`.
+crate-type = ["rlib"]
 
 [features]
 # The C ABI (include/world.h) as #[no_mangle] exports, plus buf_alloc/buf_free on wasm. Off by default so a crate that
 # depends on this one does not export them from its own cdylib; build.py turns it on for the wasm module and the
 # native libraries.
 ffi = []
+# Link the host application's Flecs (flecs_ecs_sys) instead of compiling one (SPEC.md, "Host worlds").
+host = ["flecs-c/host"]
 
 [dependencies]
 flecs-c = { path = "../flecs-c" }

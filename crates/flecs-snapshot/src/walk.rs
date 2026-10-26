@@ -12,12 +12,13 @@ use sys::{ecs_entity_t, ecs_id_t, ecs_world_t};
 
 use cid::Cid;
 
+use crate::cbor;
 use crate::dag::{self, DAG_CBOR, RAW};
 use crate::merge::Rule;
 use crate::mode::Mode;
 use crate::schema::Schema;
 
-/// Children of one parent past this count are refused for now (SPEC.md, "Large child sets").
+/// Past this many children a parent's child list is a Merkle Search Tree (SPEC.md, "Large child sets").
 pub const MAX_CHILDREN: usize = 4096;
 
 /// Blob chunking (SPEC.md, "Blobs"): FastCDC 2020 (fastcdc 5.0.0, normalization level 1, seed 0) with these sizes.
@@ -176,8 +177,35 @@ fn sort_encoded(v: &mut [Ipld]) {
     v.sort_by_cached_key(encode);
 }
 
+/// A host world's walk (SPEC.md, "Host worlds"): which entities are saved and how refs to others are written.
+/// A value in a host record before it is read: (type path, layout hash, type, pointer to the value).
+type ValuePart = (String, Ipld, ecs_entity_t, *const u8);
+
+/// A host record's parts with its values unread (`Walk::host_parts`).
+struct HostParts {
+    id: [u8; 16],
+    name: Option<String>,
+    parent: Ipld,
+    tags: Vec<Ipld>,
+    pairs: Vec<(Ipld, Ipld, Option<ValuePart>)>,
+    components: Vec<ValuePart>,
+    isa: Vec<Ipld>,
+}
+
+pub struct HostCfg {
+    /// The select tag: not a part of any record.
+    pub select: ecs_entity_t,
+    /// The saved entities.
+    pub saved: HashSet<ecs_entity_t>,
+    /// Refs to an entity outside `saved` that has an id are written as `{"id"}` instead of refused.
+    pub outside_by_id: bool,
+}
+
 pub struct Walk<'s> {
     w: *const ecs_world_t,
+    host: Option<HostCfg>,
+    /// The component and pair types whose layouts the current record used.
+    pub used: HashSet<ecs_entity_t>,
     b: Builtins,
     s: &'s Schema,
     items: Vec<Item>,
@@ -194,12 +222,38 @@ pub struct Walk<'s> {
     /// User types marked DontFragment: their values live outside the entity's type, where the walk does not read
     /// them, so an entity that has one is refused rather than written without it.
     dont_fragment: Vec<ecs_entity_t>,
+    /// Per-type caches, valid for one walk (a walk never sees a type change): members, paths for messages, layouts.
+    members_cache: HashMap<ecs_entity_t, std::rc::Rc<[Member]>>,
+    names_cache: HashMap<ecs_entity_t, std::rc::Rc<str>>,
+    layout_cache: HashMap<ecs_entity_t, Ipld>,
+    /// A struct's members in DAG-CBOR key order, each with its encoded key.
+    sorted_cache: HashMap<ecs_entity_t, Sorted>,
+    /// Per type: how `write_value` writes it.
+    kinds: HashMap<ecs_entity_t, WriteKind>,
+}
+
+/// A struct's members in DAG-CBOR key order, each with its encoded key.
+type Sorted = std::rc::Rc<[(Vec<u8>, Member)]>;
+
+/// How `write_value` writes a type's values.
+#[derive(Clone, Copy)]
+enum WriteKind {
+    Primitive(i32),
+    Struct,
+    /// An inline array: element type, count.
+    Array(ecs_entity_t, usize),
+    Vector(ecs_entity_t),
+    Bytes,
+    /// Anything else: read into an `Ipld` and written from that.
+    Other,
 }
 
 impl<'s> Walk<'s> {
     pub fn new(w: *const ecs_world_t, s: &'s Schema) -> Walk<'s> {
         Walk {
             w,
+            host: None,
+            used: HashSet::new(),
             b: Builtins::read(),
             s,
             items: Vec::new(),
@@ -212,7 +266,18 @@ impl<'s> Walk<'s> {
             in_ephemeral: false,
             stable: HashMap::new(),
             dont_fragment: Vec::new(),
+            members_cache: HashMap::new(),
+            names_cache: HashMap::new(),
+            layout_cache: HashMap::new(),
+            sorted_cache: HashMap::new(),
+            kinds: HashMap::new(),
         }
+    }
+
+    pub fn new_host(w: *const ecs_world_t, s: &'s Schema, cfg: HostCfg) -> Walk<'s> {
+        let mut walk = Walk::new(w, s);
+        walk.host = Some(cfg);
+        walk
     }
 
     fn name(&self, e: ecs_entity_t) -> Option<String> {
@@ -364,7 +429,16 @@ impl<'s> Walk<'s> {
             return Err(format!("refers to a deleted entity (#{})", e & 0xffff_ffff));
         }
         let parent = self.parent(e);
-        let p = if parent == 0 {
+        if self.host.is_some() && self.name(e).is_none() {
+            return Err(format!(
+                "entity #{} has no name, so it has no path that means the same in another world (and no id)",
+                e & 0xffff_ffff
+            ));
+        }
+        let p = if let (true, Some(n)) = (parent != 0, self.name(e)) {
+            // A named child's segment is its escaped name (as `children` gives it), so the siblings need not be listed.
+            format!("{}.{}", self.path(parent)?, escape(&n))
+        } else if parent == 0 {
             match self.name(e) {
                 Some(n) => escape(&n),
                 None => {
@@ -400,9 +474,263 @@ impl<'s> Walk<'s> {
     /// A reference to an entity: `{"id": bytes}` when it has a stable id, else `{"path": text}`.
     fn reference(&mut self, e: ecs_entity_t) -> R<Ipld> {
         if let Some(id) = self.s.stable_id(self.w, e) {
+            if let Some(h) = &self.host
+                && !h.outside_by_id
+                && !h.saved.contains(&e)
+            {
+                let what = self
+                    .path(e)
+                    .unwrap_or_else(|_| format!("#{}", e & 0xffff_ffff));
+                return Err(format!(
+                    "refers to {what} (id {}), which has an id but is not saved: save it too, or allow refs by id \
+                     to entities outside the selection (Outside::ById)",
+                    hex(&id)
+                ));
+            }
             return Ok(map([("id", Ipld::Bytes(id.to_vec()))]));
         }
         Ok(map([("path", text(self.path(e)?))]))
+    }
+
+    /// The user types marked DontFragment, found once per walk.
+    pub fn find_dont_fragment(&mut self) {
+        let df = self.b.dont_fragment;
+        let all = crate::world::grow(|buf, cap| {
+            // SAFETY: `buf` has room for `cap` ids.
+            unsafe { sys::glue_with(self.w, df, buf, cap) }
+        });
+        self.dont_fragment = all.into_iter().filter(|t| !self.is_builtin(*t)).collect();
+    }
+
+    /// A host record (SPEC.md, "Host record") of a saved entity: its own parts only, its direct bases, its parent and
+    /// name. `used` holds the types whose layouts it used.
+    pub fn host_record(&mut self, e: ecs_entity_t) -> R<BTreeMap<String, Ipld>> {
+        let p = self.host_parts(e)?;
+        let mut components = BTreeMap::new();
+        for (path, hash, ty, ptr) in p.components {
+            let value = self
+                .read_value(ty, ptr)
+                .map_err(|m| format!("component {path}: {m}"))?;
+            components.insert(path, map([("hash", hash), ("value", value)]));
+        }
+        let mut pairs = Vec::with_capacity(p.pairs.len());
+        for (r, t, data) in p.pairs {
+            let mut entry = vec![r, t];
+            if let Some((tp, hash, ty, ptr)) = data {
+                let value = self
+                    .read_value(ty, ptr)
+                    .map_err(|m| format!("pair with data type {tp}: {m}"))?;
+                entry.push(map([("type", text(tp)), ("hash", hash), ("value", value)]));
+            }
+            pairs.push(Ipld::List(entry));
+        }
+        sort_encoded(&mut pairs);
+        let mut rec = BTreeMap::new();
+        rec.insert("id".into(), Ipld::Bytes(p.id.to_vec()));
+        rec.insert("name".into(), p.name.map_or(Ipld::Null, Ipld::String));
+        rec.insert("parent".into(), p.parent);
+        rec.insert("tags".into(), Ipld::List(p.tags));
+        rec.insert("pairs".into(), Ipld::List(pairs));
+        rec.insert("components".into(), Ipld::Map(components));
+        rec.insert("isa".into(), Ipld::List(p.isa));
+        Ok(rec)
+    }
+
+    /// The host record of `e` as DAG-CBOR, written straight from the entity's memory: the same bytes as
+    /// `encode(&host_record(e))`, with no `Ipld` tree for the values.
+    pub fn host_record_cbor(&mut self, e: ecs_entity_t) -> R<([u8; 16], Vec<u8>)> {
+        let p = self.host_parts(e)?;
+        let mut out = Vec::with_capacity(256);
+        cbor::map(&mut out, 7);
+        // DAG-CBOR key order: id, isa, name, tags, pairs, parent, components.
+        cbor::text(&mut out, "id");
+        cbor::bytes(&mut out, &p.id);
+        cbor::text(&mut out, "isa");
+        cbor::ipld(&mut out, &Ipld::List(p.isa));
+        cbor::text(&mut out, "name");
+        match &p.name {
+            Some(n) => cbor::text(&mut out, n),
+            None => cbor::null(&mut out),
+        }
+        cbor::text(&mut out, "tags");
+        cbor::ipld(&mut out, &Ipld::List(p.tags));
+        cbor::text(&mut out, "pairs");
+        let mut pairs = Vec::with_capacity(p.pairs.len());
+        for (r, t, data) in p.pairs {
+            let mut b = Vec::new();
+            cbor::list(&mut b, if data.is_some() { 3 } else { 2 });
+            cbor::ipld(&mut b, &r);
+            cbor::ipld(&mut b, &t);
+            if let Some((tp, hash, ty, ptr)) = data {
+                cbor::map(&mut b, 3);
+                cbor::text(&mut b, "hash");
+                cbor::ipld(&mut b, &hash);
+                cbor::text(&mut b, "type");
+                cbor::text(&mut b, &tp);
+                cbor::text(&mut b, "value");
+                self.write_value(ty, ptr, &mut b)
+                    .map_err(|m| format!("pair with data type {tp}: {m}"))?;
+            }
+            pairs.push(b);
+        }
+        pairs.sort();
+        cbor::list(&mut out, pairs.len());
+        for b in pairs {
+            out.extend_from_slice(&b);
+        }
+        cbor::text(&mut out, "parent");
+        cbor::ipld(&mut out, &p.parent);
+        cbor::text(&mut out, "components");
+        let mut comps = p.components;
+        comps.sort_by(|a, b| cbor::key_order(&a.0, &b.0));
+        cbor::map(&mut out, comps.len());
+        for (path, hash, ty, ptr) in comps {
+            cbor::text(&mut out, &path);
+            cbor::map(&mut out, 2);
+            cbor::text(&mut out, "hash");
+            cbor::ipld(&mut out, &hash);
+            cbor::text(&mut out, "value");
+            self.write_value(ty, ptr, &mut out)
+                .map_err(|m| format!("component {path}: {m}"))?;
+        }
+        Ok((p.id, out))
+    }
+
+    /// A host entity's record without its values: everything `host_record` checks and refuses, with each value as
+    /// (path, layout hash, type, pointer).
+    fn host_parts(&mut self, e: ecs_entity_t) -> R<HostParts> {
+        self.used.clear();
+        let id = self
+            .s
+            .stable_id(self.w, e)
+            .ok_or("it has no id component")?;
+        for i in 0..self.dont_fragment.len() {
+            let t = self.dont_fragment[i];
+            if self.has(e, t) || self.has(e, sys::pair(t, self.b.wildcard)) {
+                return Err(format!(
+                    "{} is DontFragment, which snapshots do not support yet",
+                    self.path(t)?
+                ));
+            }
+        }
+        let select = self.host.as_ref().map_or(0, |h| h.select);
+        // SAFETY: a C global set by ecs_init.
+        let toggle = unsafe { sys::ECS_TOGGLE };
+        let mut tags = Vec::new();
+        let mut pairs = Vec::new();
+        let mut components = Vec::new();
+        let mut isa = Vec::new();
+        for id in self.ids(e) {
+            if id & toggle != 0 && !sys::is_pair(id) {
+                let c = id & sys::ECS_COMPONENT_MASK;
+                // SAFETY: plain query.
+                if !unsafe { sys::ecs_is_enabled_id(self.w, e, c) } {
+                    return Err(format!(
+                        "its {} is disabled (CanToggle): a snapshot does not hold the enabled bit yet",
+                        self.path(c)?
+                    ));
+                }
+                continue;
+            }
+            if id == self.b.parent {
+                return Err(
+                    "it is in Parent storage, whose value is an entity id: not saved yet".into(),
+                );
+            }
+            if id == select {
+                continue;
+            }
+            if sys::is_pair(id) && self.alive(sys::pair_first(id)) == self.b.is_a {
+                let base = self.alive(sys::pair_second(id));
+                isa.push(self.reference(base)?);
+                continue;
+            }
+            if sys::is_pair(id)
+                && (sys::pair_first(id) == self.b.wildcard & 0xffff_ffff
+                    || sys::pair_second(id) == self.b.wildcard & 0xffff_ffff)
+            {
+                return Err("it has a wildcard id".into());
+            }
+            let part = self.part(id);
+            if matches!(part, Part::Skip) || self.ephemeral(part)? {
+                continue;
+            }
+            // SAFETY: plain query; the pointer is valid while the world is unchanged.
+            let ptr = unsafe { sys::ecs_get_id(self.w, e, id) }.cast::<u8>();
+            match part {
+                Part::Skip => {}
+                Part::Tag(t) => tags.push(self.reference(t)?),
+                Part::Component(c) => {
+                    let p = self.path(c)?;
+                    if ptr.is_null() {
+                        return Err(format!("component {p}: no value"));
+                    }
+                    let hash = self
+                        .layout_record(c, false)
+                        .map_err(|m| format!("component {p}: {m}"))?;
+                    components.push((p, hash, c, ptr));
+                }
+                Part::Pair(rel, tgt, ty) => {
+                    let (r, t) = (self.reference(rel)?, self.reference(tgt)?);
+                    let data = match ty {
+                        Some(ty) => {
+                            let tp = self.path(ty)?;
+                            if ptr.is_null() {
+                                return Err(format!("pair with data type {tp}: no value"));
+                            }
+                            let hash = self
+                                .layout_record(ty, false)
+                                .map_err(|m| format!("pair with data type {tp}: {m}"))?;
+                            Some((tp, hash, ty, ptr))
+                        }
+                        None => None,
+                    };
+                    pairs.push((r, t, data));
+                }
+            }
+        }
+        sort_encoded(&mut tags);
+        sort_encoded(&mut isa);
+        let parent = match self.parent(e) {
+            0 => Ipld::Null,
+            p => self.reference(p).map_err(|m| format!("its parent: {m}"))?,
+        };
+        Ok(HostParts {
+            id,
+            name: self.name(e),
+            parent,
+            tags,
+            pairs,
+            components,
+            isa,
+        })
+    }
+
+    /// Whether `id` in a host entity's type is a part its host record lists (a tag, component or pair that is not
+    /// skipped, not Ephemeral, not IsA and not the select tag). A restore removes base-copied parts of this kind that
+    /// the record does not list.
+    pub fn listed_part(&mut self, id: ecs_id_t) -> R<bool> {
+        let select = self.host.as_ref().map_or(0, |h| h.select);
+        if id == select || id == self.b.parent {
+            return Ok(false);
+        }
+        if sys::is_pair(id) && self.alive(sys::pair_first(id)) == self.b.is_a {
+            return Ok(false);
+        }
+        let part = self.part(id);
+        Ok(!matches!(part, Part::Skip) && !self.ephemeral(part)?)
+    }
+
+    /// The layout records computed so far, by type path.
+    pub fn take_layouts(&mut self) -> BTreeMap<String, Ipld> {
+        std::mem::take(&mut self.layouts)
+    }
+
+    /// The layout record of a type (computing it if this walk has not), as `layouts` will hold it.
+    pub fn layout_record_of(&mut self, ty: ecs_entity_t) -> R<Ipld> {
+        self.layout_record(ty, false)?;
+        let tp = self.path(ty)?;
+        Ok(self.layouts[&tp].clone())
     }
 
     fn collect(
@@ -434,9 +762,10 @@ impl<'s> Walk<'s> {
         });
         self.index.insert(e, i);
         let kids = self.children(e);
-        if kids.len() > MAX_CHILDREN {
+        if kids.len() > MAX_CHILDREN && self.has(e, self.b.ordered_children) {
             return Err(format!(
-                "{path} has {} children; more than {MAX_CHILDREN} under one parent is not supported yet",
+                "{path} has {} children under OrderedChildren; past {MAX_CHILDREN} the child list is a Merkle \
+                 Search Tree, which is ordered by name, so it cannot keep the declared order",
                 kids.len()
             ));
         }
@@ -509,12 +838,7 @@ impl<'s> Walk<'s> {
         for root in roots {
             let e = self.resolve(root)?;
             if root_items.is_empty() {
-                let df = self.b.dont_fragment;
-                let all = crate::world::grow(|buf, cap| {
-                    // SAFETY: `buf` has room for `cap` ids.
-                    unsafe { sys::glue_with(self.w, df, buf, cap) }
-                });
-                self.dont_fragment = all.into_iter().filter(|t| !self.is_builtin(*t)).collect();
+                self.find_dont_fragment();
             }
             let path = self.path(e)?;
             let seg = path.clone();
@@ -722,6 +1046,353 @@ impl<'s> Walk<'s> {
         self.size(ty)
     }
 
+    /// The value at `ptr`, a live value of type `ty`, in its snapshot shape.
+    pub fn read_value(&mut self, ty: ecs_entity_t, ptr: *const u8) -> R<Ipld> {
+        if ptr.is_null() {
+            return Err("no value".into());
+        }
+        self.read(ty, ptr)
+    }
+
+    fn write_kind(&mut self, ty: ecs_entity_t) -> WriteKind {
+        if let Some(k) = self.kinds.get(&ty) {
+            return *k;
+        }
+        let k = if ty == self.s.bytes {
+            WriteKind::Bytes
+        } else if ty == self.s.blob || self.described(ty).is_some() {
+            WriteKind::Other
+        } else {
+            match self.get::<sys::EcsType>(ty, self.b.type_).map(|t| t.kind) {
+                Some(sys::EcsPrimitiveType) => {
+                    match self.get::<sys::EcsPrimitive>(ty, self.b.primitive) {
+                        Some(p) if p.kind != sys::EcsId => WriteKind::Primitive(p.kind),
+                        _ => WriteKind::Other,
+                    }
+                }
+                Some(sys::EcsStructType) => WriteKind::Struct,
+                Some(sys::EcsArrayType) => match self.get::<sys::EcsArray>(ty, self.b.array) {
+                    Some(a) => WriteKind::Array(a.type_, a.count as usize),
+                    None => WriteKind::Other,
+                },
+                Some(sys::EcsVectorType) => match self.get::<sys::EcsVector>(ty, self.b.vector) {
+                    Some(v) => WriteKind::Vector(v.type_),
+                    None => WriteKind::Other,
+                },
+                _ => WriteKind::Other,
+            }
+        };
+        self.kinds.insert(ty, k);
+        k
+    }
+
+    fn sorted_members(&mut self, ty: ecs_entity_t) -> R<Sorted> {
+        if let Some(m) = self.sorted_cache.get(&ty) {
+            return Ok(m.clone());
+        }
+        let mut ms: Vec<(Vec<u8>, Member)> = self
+            .members(ty)?
+            .iter()
+            .map(|m| {
+                let mut k = Vec::new();
+                cbor::text(&mut k, &m.name);
+                (k, m.clone())
+            })
+            .collect();
+        ms.sort_by(|a, b| cbor::key_order(&a.1.name, &b.1.name));
+        let ms: std::rc::Rc<[(Vec<u8>, Member)]> = ms.into();
+        self.sorted_cache.insert(ty, ms.clone());
+        Ok(ms)
+    }
+
+    /// Appends the DAG-CBOR of the value at `ptr` (a live value of `ty`): the same bytes as `encode(&read(ty, ptr))`.
+    pub fn write_value(&mut self, ty: ecs_entity_t, ptr: *const u8, out: &mut Vec<u8>) -> R<()> {
+        match self.write_kind(ty) {
+            WriteKind::Primitive(k) => self.write_primitive(k, ptr, out),
+            WriteKind::Struct => {
+                let ms = self.sorted_members(ty)?;
+                cbor::map(out, ms.len());
+                for (key, m) in ms.iter() {
+                    out.extend_from_slice(key);
+                    // SAFETY: member offsets are within the struct.
+                    let p = unsafe { ptr.add(m.offset) };
+                    if m.count > 1 {
+                        let stride = self.size(m.type_)?;
+                        cbor::list(out, m.count as usize);
+                        for i in 0..m.count as usize {
+                            // SAFETY: an inline array of `count` elements.
+                            self.write_value(m.type_, unsafe { p.add(i * stride) }, out)
+                                .map_err(|e| member_err(&format!("{}[{i}]", m.name), e))?;
+                        }
+                    } else {
+                        self.write_value(m.type_, p, out)
+                            .map_err(|e| member_err(&m.name, e))?;
+                    }
+                }
+                Ok(())
+            }
+            WriteKind::Array(et, n) => {
+                let stride = self.size(et)?;
+                cbor::list(out, n);
+                for i in 0..n {
+                    // SAFETY: an array of `n` elements.
+                    self.write_value(et, unsafe { ptr.add(i * stride) }, out)
+                        .map_err(|e| member_err(&format!("[{i}]"), e))?;
+                }
+                Ok(())
+            }
+            WriteKind::Vector(et) => {
+                let stride = self.size(et)?;
+                // SAFETY: a vector value is an ecs_vec_t holding `count` elements.
+                let v = unsafe { &*ptr.cast::<sys::ecs_vec_t>() };
+                let base = v.array.cast::<u8>();
+                cbor::list(out, v.count as usize);
+                for i in 0..v.count as usize {
+                    // SAFETY: as above.
+                    self.write_value(et, unsafe { base.add(i * stride) }, out)
+                        .map_err(|e| member_err(&format!("[{i}]"), e))?;
+                }
+                Ok(())
+            }
+            WriteKind::Bytes => {
+                // SAFETY: an ecs_vec_t of `count` bytes.
+                let data = unsafe {
+                    let v = &*ptr.cast::<sys::ecs_vec_t>();
+                    if v.count == 0 {
+                        &[][..]
+                    } else {
+                        std::slice::from_raw_parts(v.array.cast::<u8>(), v.count as usize)
+                    }
+                };
+                cbor::bytes(out, data);
+                Ok(())
+            }
+            WriteKind::Other => {
+                let v = self.read(ty, ptr)?;
+                cbor::ipld(out, &v);
+                Ok(())
+            }
+        }
+    }
+
+    /// Reads the DAG-CBOR value at `d`, saved with the layout the live type `ty` has now, over the live value at `dst`;
+    /// with `dst` null it only checks the value (as `check::value` does) and resolves no ref. The direct path of a
+    /// restore: no `Ipld` tree except for the kinds it hands to `world::write_at` (enums, bitmasks, vectors, bytes,
+    /// opaque and described types, ids).
+    pub fn read_into(
+        &mut self,
+        ty: ecs_entity_t,
+        d: &mut cbor::Decoder<'_>,
+        dst: *mut u8,
+        ids: &mut dyn crate::described::Resolve,
+    ) -> R<()> {
+        let at = |p: *mut u8, off: usize| if p.is_null() { p } else { p.wrapping_add(off) };
+        match self.write_kind(ty) {
+            WriteKind::Primitive(k) => self.read_primitive(k, ty, d, dst, ids),
+            WriteKind::Struct => {
+                let ms = self.sorted_members(ty)?;
+                let n = d.expect(5, "a struct value (a map)")?;
+                if n != ms.len() as u64 {
+                    return Err(format!(
+                        "the struct value has {n} members, its type {}",
+                        ms.len()
+                    ));
+                }
+                for (_, m) in ms.iter() {
+                    d.key(&m.name)
+                        .map_err(|e| format!("the struct value's members: {e}"))?;
+                    let p = at(dst, m.offset);
+                    if m.count > 1 {
+                        let stride = self.size(m.type_)?;
+                        d.list_of(m.count as usize, "an inline array")
+                            .map_err(|e| member_err(&m.name, e))?;
+                        for i in 0..m.count as usize {
+                            self.read_into(m.type_, d, at(p, i * stride), ids)
+                                .map_err(|e| member_err(&format!("{}[{i}]", m.name), e))?;
+                        }
+                    } else {
+                        self.read_into(m.type_, d, p, ids)
+                            .map_err(|e| member_err(&m.name, e))?;
+                    }
+                }
+                Ok(())
+            }
+            WriteKind::Array(et, n) => {
+                let stride = self.size(et)?;
+                d.list_of(n, "an array")?;
+                for i in 0..n {
+                    self.read_into(et, d, at(dst, i * stride), ids)
+                        .map_err(|e| member_err(&format!("[{i}]"), e))?;
+                }
+                Ok(())
+            }
+            WriteKind::Vector(_) | WriteKind::Bytes | WriteKind::Other => {
+                self.read_other(ty, d, dst, ids)
+            }
+        }
+    }
+
+    fn read_other(
+        &mut self,
+        ty: ecs_entity_t,
+        d: &mut cbor::Decoder<'_>,
+        dst: *mut u8,
+        ids: &mut dyn crate::described::Resolve,
+    ) -> R<()> {
+        let v = d.value(0)?;
+        let l = self.layout(ty)?;
+        crate::check::value(&v, &l, crate::check::Blobs::Links)?;
+        if dst.is_null() {
+            return Ok(());
+        }
+        crate::world::write_at(self.w.cast_mut(), self.s, ty, dst, &v, &l, ids)
+    }
+
+    fn read_primitive(
+        &mut self,
+        kind: i32,
+        ty: ecs_entity_t,
+        d: &mut cbor::Decoder<'_>,
+        dst: *mut u8,
+        ids: &mut dyn crate::described::Resolve,
+    ) -> R<()> {
+        let w = !dst.is_null();
+        macro_rules! int {
+            ($t:ty) => {{
+                let i = d.int()?;
+                let x = <$t>::try_from(i)
+                    .map_err(|_| format!("{i} does not fit {}", stringify!($t)))?;
+                if w {
+                    // SAFETY: `dst` is a live value of this primitive kind.
+                    unsafe { dst.cast::<$t>().write_unaligned(x) };
+                }
+            }};
+        }
+        match kind {
+            sys::EcsBool => {
+                let b = match d.peek()? {
+                    0xf4 => false,
+                    0xf5 => true,
+                    _ => return Err("not a bool value".into()),
+                };
+                d.value(0)?;
+                if w {
+                    // SAFETY: as above.
+                    unsafe { dst.write(b as u8) };
+                }
+            }
+            sys::EcsChar | sys::EcsI8 => int!(i8),
+            sys::EcsByte | sys::EcsU8 => int!(u8),
+            sys::EcsU16 => int!(u16),
+            sys::EcsU32 => int!(u32),
+            sys::EcsU64 => int!(u64),
+            sys::EcsI16 => int!(i16),
+            sys::EcsI32 => int!(i32),
+            sys::EcsI64 => int!(i64),
+            sys::EcsUPtr => int!(usize),
+            sys::EcsIPtr => int!(isize),
+            sys::EcsF32 => {
+                let f = d.float()?;
+                if w {
+                    // SAFETY: as above.
+                    unsafe { dst.cast::<f32>().write_unaligned(f as f32) };
+                }
+            }
+            sys::EcsF64 => {
+                let f = d.float()?;
+                if w {
+                    // SAFETY: as above.
+                    unsafe { dst.cast::<f64>().write_unaligned(f) };
+                }
+            }
+            sys::EcsString => {
+                let s = if d.peek()? == 0xf6 {
+                    d.value(0)?;
+                    None
+                } else {
+                    let s = d.str()?;
+                    if s.contains('\0') {
+                        return Err("a string contains a NUL byte".into());
+                    }
+                    Some(s)
+                };
+                if w {
+                    let (p, n) = s.map_or((core::ptr::null(), 0), |s| {
+                        (s.as_ptr().cast::<c_char>(), s.len())
+                    });
+                    let n = i32::try_from(n).map_err(|_| "a string too long for Flecs")?;
+                    // SAFETY: `dst` is a live Flecs string slot; `p` holds `n` bytes.
+                    if unsafe { sys::glue_set_string(dst.cast(), p, n) } != 0 {
+                        return Err("out of memory for a string".into());
+                    }
+                }
+            }
+            sys::EcsEntity => {
+                let v = d.value(0)?;
+                let e = match v {
+                    Ipld::Null => 0,
+                    r => {
+                        crate::check::reference(&r, "entity value")?;
+                        if w { ids.entity(&r)? } else { 0 }
+                    }
+                };
+                if w {
+                    // SAFETY: as above.
+                    unsafe { dst.cast::<u64>().write_unaligned(e) };
+                }
+            }
+            _ => return self.read_other(ty, d, dst, ids),
+        }
+        Ok(())
+    }
+
+    fn write_primitive(&mut self, kind: i32, p: *const u8, out: &mut Vec<u8>) -> R<()> {
+        // SAFETY: `p` points at a value of the primitive kind.
+        unsafe {
+            match kind {
+                sys::EcsBool => cbor::bool(out, p.read() != 0),
+                sys::EcsChar | sys::EcsI8 => cbor::int(out, p.cast::<i8>().read() as i128),
+                sys::EcsByte | sys::EcsU8 => cbor::int(out, p.read() as i128),
+                sys::EcsU16 => cbor::int(out, p.cast::<u16>().read_unaligned() as i128),
+                sys::EcsU32 => cbor::int(out, p.cast::<u32>().read_unaligned() as i128),
+                sys::EcsU64 => cbor::int(out, p.cast::<u64>().read_unaligned() as i128),
+                sys::EcsI16 => cbor::int(out, p.cast::<i16>().read_unaligned() as i128),
+                sys::EcsI32 => cbor::int(out, p.cast::<i32>().read_unaligned() as i128),
+                sys::EcsI64 => cbor::int(out, p.cast::<i64>().read_unaligned() as i128),
+                sys::EcsUPtr => cbor::int(out, p.cast::<usize>().read_unaligned() as i128),
+                sys::EcsIPtr => cbor::int(out, p.cast::<isize>().read_unaligned() as i128),
+                sys::EcsF32 | sys::EcsF64 => {
+                    let v = if kind == sys::EcsF32 {
+                        p.cast::<f32>().read_unaligned() as f64
+                    } else {
+                        p.cast::<f64>().read_unaligned()
+                    };
+                    float(v)?;
+                    cbor::float(out, v);
+                }
+                _ => {
+                    let v = self.primitive(kind, p)?;
+                    cbor::ipld(out, &v);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The value type `ty`'s constructor makes (zeroed memory without one), in its snapshot shape.
+    pub fn default_value(&mut self, ty: ecs_entity_t) -> R<Ipld> {
+        // SAFETY: a new writer over a default-constructed value of `ty`, freed below.
+        let wr = unsafe { sys::glue_writer_new(self.w, ty) };
+        if wr.is_null() {
+            return Err("cannot make a value of it".into());
+        }
+        // SAFETY: the writer's value is live until it is freed.
+        let r = self.read(ty, unsafe { sys::glue_writer_ptr(wr) }.cast());
+        // SAFETY: freed once.
+        unsafe { sys::glue_writer_free(self.w, wr) };
+        r
+    }
+
     fn size(&self, ty: ecs_entity_t) -> R<usize> {
         self.get::<sys::EcsComponent>(ty, self.b.component)
             .map(|c| c.size as usize)
@@ -753,11 +1424,60 @@ impl<'s> Walk<'s> {
 
     /// The layout of a component or pair type (SPEC.md, "Layouts").
     pub fn layout(&mut self, ty: ecs_entity_t) -> R<Ipld> {
-        self.layout_in(ty, false)
+        if let Some(l) = self.layout_cache.get(&ty) {
+            return Ok(l.clone());
+        }
+        let l = self.layout_in(ty, false)?;
+        self.layout_cache.insert(ty, l.clone());
+        Ok(l)
+    }
+
+    /// Whether a value of `ty` is all its bytes: no pointer to memory the value owns (no string, vector, opaque or
+    /// described type), so two equal byte strings are equal values. Entity members count, with the refs caveat of
+    /// SPEC.md, "Incremental hashing".
+    pub fn is_pod(&mut self, ty: ecs_entity_t) -> bool {
+        fn pod(l: &Ipld) -> bool {
+            match l {
+                Ipld::String(p) => p != "string" && p != "bytes",
+                Ipld::Map(m) => {
+                    if let Some(Ipld::List(ms)) = m.get("members") {
+                        ms.iter()
+                            .all(|x| matches!(x, Ipld::List(x) if x.get(1).is_some_and(pod)))
+                    } else if let Some(e) = m.get("array") {
+                        pod(e)
+                    } else {
+                        m.contains_key("enum") || m.contains_key("bitmask")
+                    }
+                }
+                _ => false,
+            }
+        }
+        if self.described(ty).is_some() {
+            return false;
+        }
+        self.layout(ty).is_ok_and(|l| pod(&l))
+    }
+
+    /// A type's path for messages ("" when it has none), cached.
+    fn tp(&mut self, ty: ecs_entity_t) -> std::rc::Rc<str> {
+        if let Some(n) = self.names_cache.get(&ty) {
+            return n.clone();
+        }
+        let n: std::rc::Rc<str> = self.path(ty).unwrap_or_default().into();
+        self.names_cache.insert(ty, n.clone());
+        n
+    }
+
+    /// The description of a type, when the host gave one (SPEC.md, "Described types").
+    fn described(&self, ty: ecs_entity_t) -> Option<&'static crate::described::Described> {
+        crate::described::of(self.w, self.s.described, ty)
     }
 
     /// Whether a type is a struct (merged member by member unless a rule covers it).
     fn is_struct(&self, ty: ecs_entity_t) -> bool {
+        if let Some(d) = self.described(ty) {
+            return matches!(&d.layout, Ipld::Map(m) if m.contains_key("struct"));
+        }
         ty != self.s.bytes
             && ty != self.s.blob
             && self.get::<sys::EcsType>(ty, self.b.type_).map(|t| t.kind)
@@ -777,6 +1497,11 @@ impl<'s> Walk<'s> {
         let tp = self
             .path(ty)
             .unwrap_or_else(|_| format!("#{}", ty & 0xffff_ffff));
+        if let Some(d) = self.described(ty) {
+            let whole = if covered { None } else { self.rule_of(ty)? };
+            return crate::check::fill_rules(&d.layout, covered, whole)
+                .map_err(|e| format!("type {tp}: {e}"));
+        }
         let kind = self
             .get::<sys::EcsType>(ty, self.b.type_)
             .map(|t| t.kind)
@@ -787,12 +1512,6 @@ impl<'s> Walk<'s> {
                     .get::<sys::EcsPrimitive>(ty, self.b.primitive)
                     .ok_or("no primitive kind")?
                     .kind;
-                if k == sys::EcsUPtr || k == sys::EcsIPtr {
-                    return Err(format!(
-                        "type {tp}: uptr and iptr have the host's pointer width, which differs between native and \
-                         wasm, so they are refused; use u64 or i64"
-                    ));
-                }
                 text(
                     primitive_name(k)
                         .ok_or_else(|| format!("type {tp}: unknown primitive kind {k}"))?,
@@ -823,7 +1542,7 @@ impl<'s> Walk<'s> {
             sys::EcsStructType => {
                 let whole = if covered { None } else { self.rule_of(ty)? };
                 let mut members = Vec::new();
-                for m in self.members(ty)? {
+                for m in self.members(ty)?.iter() {
                     let own = if m.entity != 0 && !covered {
                         self.rule_of(m.entity)?
                     } else {
@@ -852,7 +1571,7 @@ impl<'s> Walk<'s> {
                         r.check(&l).map_err(|e| member_err(&m.name, e))?;
                     }
                     members.push(Ipld::List(vec![
-                        text(m.name),
+                        text(m.name.clone()),
                         l,
                         rule.map_or(Ipld::Null, |r| text(r.name())),
                     ]));
@@ -880,9 +1599,12 @@ impl<'s> Walk<'s> {
                 map([("vector", self.layout_in(et, true)?)])
             }
             sys::EcsOpaqueType => {
-                return Err(format!(
-                    "type {tp} is opaque (serialised by a C callback): not supported"
-                ));
+                // SAFETY: plain query.
+                let as_type = unsafe { sys::glue_opaque_as_type(self.w, ty) };
+                if as_type == 0 {
+                    return Err(format!("type {tp} is opaque with no as_type"));
+                }
+                return self.layout_in(as_type, covered);
             }
             sys::EcsMapType => return Err(format!("type {tp} is a map: not supported")),
             _ => return Err(format!("type {tp} has an unsupported kind ({kind})")),
@@ -893,6 +1615,7 @@ impl<'s> Walk<'s> {
     /// "validated_by", "hash"}`, where `merge` is the whole value's rule for a non-struct type (null for structs, whose
     /// members carry theirs) and `hash` is the first 8 bytes of SHA-256 over the record without `hash`.
     fn layout_record(&mut self, ty: ecs_entity_t, ephemeral: bool) -> R<Ipld> {
+        self.used.insert(ty);
         let tp = self.path(ty)?;
         let cache = if ephemeral {
             &self.ephemeral_layouts
@@ -915,7 +1638,10 @@ impl<'s> Walk<'s> {
         let (wb, vb) = (self.s.writable_by, self.s.validated_by);
         let writable_by = self.target_ref(ty, wb)?;
         let validated_by = self.target_ref(ty, vb)?;
+        let (base, version) = crate::check::base_version(&tp)?;
         let mut body = BTreeMap::new();
+        body.insert("base".to_string(), text(base));
+        body.insert("version".to_string(), Ipld::Integer(version as i128));
         body.insert("layout".to_string(), l);
         body.insert("merge".to_string(), merge);
         body.insert("writable_by".to_string(), writable_by);
@@ -982,7 +1708,10 @@ impl<'s> Walk<'s> {
         Ok(out)
     }
 
-    fn members(&self, ty: ecs_entity_t) -> R<Vec<Member>> {
+    fn members(&mut self, ty: ecs_entity_t) -> R<std::rc::Rc<[Member]>> {
+        if let Some(m) = self.members_cache.get(&ty) {
+            return Ok(m.clone());
+        }
         let s = self
             .get::<sys::EcsStruct>(ty, self.b.struct_)
             .ok_or("no struct data")?;
@@ -999,6 +1728,8 @@ impl<'s> Walk<'s> {
                 entity: m.member,
             });
         }
+        let out: std::rc::Rc<[Member]> = out.into();
+        self.members_cache.insert(ty, out.clone());
         Ok(out)
     }
 
@@ -1030,9 +1761,16 @@ impl<'s> Walk<'s> {
                     "a Blob cannot be Ephemeral (it needs stored blocks); use Bytes".into(),
                 );
             }
+            if self.host.is_some() {
+                return Err("a Blob in a host world is not supported yet; use Bytes".into());
+            }
             return self.blob(data).map(Ipld::Link);
         }
-        let tp = self.path(ty).unwrap_or_default();
+        if let Some(d) = self.described(ty) {
+            // SAFETY: `ptr` is a live value of `ty`, which `d` describes.
+            return unsafe { (d.read)(ptr, self) };
+        }
+        let tp = self.tp(ty);
         let kind = self
             .get::<sys::EcsType>(ty, self.b.type_)
             .map(|t| t.kind)
@@ -1085,7 +1823,7 @@ impl<'s> Walk<'s> {
             }
             sys::EcsStructType => {
                 let mut entries = BTreeMap::new();
-                for m in self.members(ty)? {
+                for m in self.members(ty)?.iter() {
                     // SAFETY: member offsets are within the struct.
                     let p = unsafe { ptr.add(m.offset) };
                     let v = if m.count > 1 {
@@ -1101,7 +1839,7 @@ impl<'s> Walk<'s> {
                     } else {
                         self.read(m.type_, p).map_err(|e| member_err(&m.name, e))?
                     };
-                    entries.insert(m.name, v);
+                    entries.insert(m.name.clone(), v);
                 }
                 Ok(Ipld::Map(entries))
             }
@@ -1140,7 +1878,64 @@ impl<'s> Walk<'s> {
                         .collect::<R<_>>()?,
                 ))
             }
+            sys::EcsOpaqueType => self.read_opaque(ty, ptr, &tp),
             _ => self.layout(ty).map(|_| Ipld::Null), // layout() names the unsupported kind
+        }
+    }
+
+    /// An opaque value, read through its type's serialize callback, in the shape of its `as_type`.
+    fn read_opaque(&mut self, ty: ecs_entity_t, ptr: *const u8, tp: &str) -> R<Ipld> {
+        // SAFETY: plain query.
+        let as_type = unsafe { sys::glue_opaque_as_type(self.w, ty) };
+        let kind = self
+            .get::<sys::EcsType>(as_type, self.b.type_)
+            .map(|t| t.kind)
+            .ok_or_else(|| format!("opaque {tp}: its as_type has no reflection data"))?;
+        let mut cx = Opaque {
+            walk: self,
+            items: Vec::new(),
+            member: None,
+            err: None,
+        };
+        // SAFETY: `ptr` is a live value of `ty`; the callbacks get `cx` back as their context and only run during
+        // this call.
+        let rc = unsafe {
+            sys::glue_opaque_serialize(
+                cx.walk.w,
+                ty,
+                ptr.cast(),
+                opaque_value,
+                opaque_member,
+                (&raw mut cx).cast(),
+            )
+        };
+        if let Some(e) = cx.err {
+            return Err(e);
+        }
+        if rc != 0 {
+            return Err(format!("opaque {tp}: its serialize callback failed ({rc})"));
+        }
+        let items = cx.items;
+        match kind {
+            sys::EcsVectorType | sys::EcsArrayType => {
+                Ok(Ipld::List(items.into_iter().map(|(_, v)| v).collect()))
+            }
+            sys::EcsStructType => Ok(Ipld::Map(
+                items
+                    .into_iter()
+                    .map(|(n, v)| (n.unwrap_or_default(), v))
+                    .collect(),
+            )),
+            _ => {
+                let n = items.len();
+                let mut it = items.into_iter();
+                match (it.next(), n) {
+                    (Some((_, v)), 1) => Ok(v),
+                    _ => Err(format!(
+                        "opaque {tp}: its serialize callback gave {n} values for a single value"
+                    )),
+                }
+            }
         }
     }
 
@@ -1242,6 +2037,63 @@ impl<'s> Walk<'s> {
     }
 }
 
+impl crate::described::Refs for Walk<'_> {
+    fn reference(&mut self, e: ecs_entity_t) -> R<Ipld> {
+        if e == 0 {
+            return Ok(Ipld::Null);
+        }
+        Walk::reference(self, e)
+    }
+}
+
+/// The state `glue_opaque_serialize`'s callbacks fill.
+struct Opaque<'a, 's> {
+    walk: &'a mut Walk<'s>,
+    items: Vec<(Option<String>, Ipld)>,
+    member: Option<String>,
+    err: Option<String>,
+}
+
+unsafe extern "C" fn opaque_value(
+    ctx: *mut std::ffi::c_void,
+    ty: ecs_entity_t,
+    ptr: *const std::ffi::c_void,
+) -> std::ffi::c_int {
+    // SAFETY: `ctx` is the `Opaque` read_opaque passed, alive for the call.
+    let cx = unsafe { &mut *ctx.cast::<Opaque<'_, '_>>() };
+    let at = cx.items.len();
+    match cx.walk.read(ty, ptr.cast()) {
+        Ok(v) => {
+            let name = cx.member.take();
+            cx.items.push((name, v));
+            0
+        }
+        Err(e) => {
+            if cx.err.is_none() {
+                cx.err = Some(match &cx.member {
+                    Some(n) => member_err(n, e),
+                    None => member_err(&format!("[{at}]"), e),
+                });
+            }
+            -1
+        }
+    }
+}
+
+unsafe extern "C" fn opaque_member(
+    ctx: *mut std::ffi::c_void,
+    name: *const c_char,
+) -> std::ffi::c_int {
+    // SAFETY: as in opaque_value; `name` is a NUL-terminated member name.
+    let cx = unsafe { &mut *ctx.cast::<Opaque<'_, '_>>() };
+    cx.member = cstr(name);
+    0
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 /// DAG-CBOR has no NaN or infinities: refuse them rather than write something else.
 pub(crate) fn float(v: f64) -> R<Ipld> {
     if v.is_finite() {
@@ -1253,6 +2105,7 @@ pub(crate) fn float(v: f64) -> R<Ipld> {
     }
 }
 
+#[derive(Clone)]
 struct Member {
     name: String,
     type_: ecs_entity_t,

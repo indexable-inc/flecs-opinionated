@@ -152,7 +152,9 @@ fn s(v: &str) -> Ipld {
 /// C1: an unsigned enum's constants keep their values (they were all written as 0).
 #[test]
 fn unsigned_enum_constants() {
-    let w = world("using flecs.meta\nenum U {\n  enum: {underlying_type: u32}\n  A { (constant, u32): {1} }\n  B { (constant, u32): {7} }\n}\ne { U: {B} }\n");
+    let w = world(
+        "using flecs.meta\nenum U {\n  enum: {underlying_type: u32}\n  A { (constant, u32): {1} }\n  B { (constant, u32): {7} }\n}\ne { U: {B} }\n",
+    );
     let doc = w.document(&["e"]).unwrap();
     let l = field(field(field(&doc, "layouts"), "U"), "layout");
     let pair = |n: &str, v: i128| Ipld::List(vec![s(n), Ipld::Integer(v)]);
@@ -168,7 +170,9 @@ fn unsigned_enum_constants() {
 /// C2: a raw value that is no constant of a signed enum is an error (0 used to match the first constant).
 #[test]
 fn signed_enum_raw_zero_is_refused() {
-    let w = world("using flecs.meta\nenum S {\n  A { (constant, i32): {5} }\n  B { (constant, i32): {6} }\n}\ne { S }\n");
+    let w = world(
+        "using flecs.meta\nenum S {\n  A { (constant, i32): {5} }\n  B { (constant, i32): {6} }\n}\ne { S }\n",
+    );
     let e = w.document(&["e"]).unwrap_err();
     assert!(e.contains("value 0 is not a constant of enum S"), "{e}");
 }
@@ -243,7 +247,9 @@ fn hash_names_do_not_collide_with_unnamed_children() {
 #[test]
 fn integer_literal_past_u64_saturates() {
     for lit in ["99999999999999999999", "18446744073709551615"] {
-        let w = world(&format!("struct U {{\n  v = u64\n}}\nx {{ U: {{{lit}}} }}\n"));
+        let w = world(&format!(
+            "struct U {{\n  v = u64\n}}\nx {{ U: {{{lit}}} }}\n"
+        ));
         let doc = w.document(&["x"]).unwrap();
         let v = field(
             field(field(field(entity(&doc, "x"), "components"), "U"), "value"),

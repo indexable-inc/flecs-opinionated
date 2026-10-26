@@ -39,6 +39,12 @@ sync {
   Bytes = flecs.meta.vector: {type: flecs.meta.u8}
   Blob = flecs.meta.vector: {type: flecs.meta.u8}
 
+  // On a type entity in a host process: a pointer to the type's description (SPEC.md, "Described types"). Never in a
+  // snapshot; a script world never has it.
+  struct Described {
+    ptr = flecs.meta.uptr
+  }
+
   // Reserved, not enforced (SPEC.md, "Permissions").
   // An actor: an entity with its public key. `key` is its raw ed25519 public key in lowercase hex (64 digits): the actor id.
   struct Actor {
@@ -77,6 +83,7 @@ pub struct Schema {
     pub sync: ecs_entity_t,
     pub bytes: ecs_entity_t,
     pub blob: ecs_entity_t,
+    pub described: ecs_entity_t,
     rules: Vec<(ecs_entity_t, Rule)>,
     modes: Vec<(ecs_entity_t, Mode)>,
     lookup: Box<[ecs_entity_t; 3]>,
@@ -91,9 +98,29 @@ fn lookup(w: *const ecs_world_t, path: &str) -> Result<ecs_entity_t, String> {
     }
 }
 
+/// Adds the `sync` module to a world that has none (a host world), leaving its lookup path alone.
+pub fn ensure(w: *mut ecs_world_t) -> Result<(), String> {
+    // SAFETY: plain lookup.
+    if unsafe { sys::ecs_lookup(w, c"sync.Described".as_ptr()) } != 0 {
+        return Ok(());
+    }
+    if unsafe { sys::ecs_lookup(w, c"sync".as_ptr()) } != 0 {
+        return Err("the world has a sync entity that is not this library's sync module (no sync.Described)".into());
+    }
+    crate::world::script(w, "sync", SCRIPT).map_err(|e| format!("adding the sync module: {e}"))
+}
+
 impl Schema {
     /// Looks the module up after SCRIPT ran, and puts it on the lookup path.
     pub fn new(w: *mut ecs_world_t) -> Result<Schema, String> {
+        let s = Schema::find(w)?;
+        // SAFETY: the array is zero-terminated and lives as long as the Schema, which lives as long as the world.
+        unsafe { sys::ecs_set_lookup_path(w, s.lookup.as_ptr()) };
+        Ok(s)
+    }
+
+    /// The module's entities, without touching the lookup path (a host world's is the host's).
+    pub fn find(w: *mut ecs_world_t) -> Result<Schema, String> {
         let module = lookup(w, "sync")?;
         let mut rules = Vec::new();
         for r in Rule::ALL {
@@ -114,12 +141,11 @@ impl Schema {
             sync: lookup(w, "sync.Sync")?,
             bytes: lookup(w, "sync.Bytes")?,
             blob: lookup(w, "sync.Blob")?,
+            described: lookup(w, "sync.Described")?,
             rules,
             modes,
             lookup: Box::new([core, module, 0]),
         };
-        // SAFETY: the array is zero-terminated and lives as long as the Schema, which lives as long as the world.
-        unsafe { sys::ecs_set_lookup_path(w, s.lookup.as_ptr()) };
         Ok(s)
     }
 

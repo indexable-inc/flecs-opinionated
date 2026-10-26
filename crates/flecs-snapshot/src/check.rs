@@ -31,9 +31,14 @@ fn int_range(name: &str) -> Option<(i128, i128)> {
     })
 }
 
-const OTHER_PRIMITIVES: [&str; 8] = [
-    "bool", "f32", "f64", "string", "entity", "id", "bytes", "blob",
+const OTHER_PRIMITIVES: [&str; 10] = [
+    "bool", "f32", "f64", "f16", "bf16", "string", "entity", "id", "bytes", "blob",
 ];
+
+/// The float layouts (SPEC.md, "Values"; `f16` and `bf16` come from described types).
+fn is_float(p: &str) -> bool {
+    matches!(p, "f32" | "f64" | "f16" | "bf16")
+}
 
 /// The map's keys are exactly `keys`.
 pub fn exact<'a>(v: &'a Ipld, keys: &[&str], what: &str) -> R<&'a BTreeMap<String, Ipld>> {
@@ -104,7 +109,90 @@ fn rule(v: &Ipld, what: &str) -> R<Option<Rule>> {
 
 /// A layout `L` (SPEC.md, "Layouts") of a whole component or pair value.
 pub fn layout(l: &Ipld) -> R<()> {
-    layout_in(l, false)
+    layout_in(l, false, false)
+}
+
+/// A described type's layout (SPEC.md, "Described types"): well formed, but a member's rule slot may be null where
+/// the library fills in the default.
+pub fn described_layout(l: &Ipld) -> R<()> {
+    layout_in(l, false, true)
+}
+
+/// A described layout with its rule slots filled as for a Flecs struct (SPEC.md, "Described types"): a member's own
+/// rule, else `whole` (the type's `(Merge, rule)`), else null for a nested struct and the default for anything else;
+/// inside a covered value (a member with a rule, an element, an option's value, a union's payload, a map's keys and
+/// values) every slot stays null, and a slot set there is an error.
+pub fn fill_rules(l: &Ipld, covered: bool, whole: Option<Rule>) -> R<Ipld> {
+    let Ipld::Map(m) = l else {
+        return Ok(l.clone());
+    };
+    let mut out = m.clone();
+    if m.contains_key("struct") {
+        let mut members = Vec::new();
+        for x in list(&m["members"], "members")? {
+            let [n, ml, r] = list(x, "member")? else {
+                return Err("a member is not [name, layout, rule]".into());
+            };
+            let name = text(n, "member name")?;
+            let own = rule(r, "member rule")?;
+            if covered && own.is_some() {
+                return Err(format!(
+                    "member {name}: has a rule inside a value merged whole by an enclosing rule"
+                ));
+            }
+            let rule = if covered {
+                None
+            } else {
+                match own.or(whole) {
+                    Some(r) => Some(r),
+                    None if is_struct(ml) => None,
+                    None => Some(Rule::DEFAULT),
+                }
+            };
+            let inner =
+                fill_rules(ml, covered || rule.is_some(), None).map_err(|e| member_err(name, e))?;
+            if let Some(r) = rule {
+                r.check(&inner).map_err(|e| member_err(name, e))?;
+            }
+            members.push(Ipld::List(vec![
+                n.clone(),
+                inner,
+                rule.map_or(Ipld::Null, |r| Ipld::String(r.name().into())),
+            ]));
+        }
+        out.insert("members".into(), Ipld::List(members));
+        return Ok(Ipld::Map(out));
+    }
+    for k in ["array", "vector", "option"] {
+        if let Some(inner) = m.get(k) {
+            out.insert(k.into(), fill_rules(inner, true, None)?);
+            return Ok(Ipld::Map(out));
+        }
+    }
+    if let Some(Ipld::List(kv)) = m.get("map") {
+        let kv = kv
+            .iter()
+            .map(|x| fill_rules(x, true, None))
+            .collect::<R<Vec<_>>>()?;
+        out.insert("map".into(), Ipld::List(kv));
+        return Ok(Ipld::Map(out));
+    }
+    if m.contains_key("union") {
+        let mut vs = Vec::new();
+        for x in list(&m["variants"], "variants")? {
+            let [n, pl] = list(x, "variant")? else {
+                return Err("a variant is not [name, layout | null]".into());
+            };
+            let name = text(n, "variant name")?;
+            let pl = match pl {
+                Ipld::Null => Ipld::Null,
+                pl => fill_rules(pl, true, None).map_err(|e| member_err(name, e))?,
+            };
+            vs.push(Ipld::List(vec![n.clone(), pl]));
+        }
+        out.insert("variants".into(), Ipld::List(vs));
+    }
+    Ok(Ipld::Map(out))
 }
 
 fn is_struct(l: &Ipld) -> bool {
@@ -112,12 +200,10 @@ fn is_struct(l: &Ipld) -> bool {
 }
 
 /// `covered`: inside a value one rule merges whole, where no struct member carries a rule (SPEC.md, "Merge rules").
-/// Outside, every member carries one, except a nested struct merged field by field (null).
-fn layout_in(l: &Ipld, covered: bool) -> R<()> {
+/// Outside, every member carries one, except a nested struct merged field by field (null). `lenient` allows a null
+/// slot anywhere (a described layout, before `fill_rules`).
+fn layout_in(l: &Ipld, covered: bool, lenient: bool) -> R<()> {
     match l {
-        Ipld::String(p) if p == "uptr" || p == "iptr" => Err(format!(
-            "{p} has the host's pointer width and is refused in layouts"
-        )),
         Ipld::String(p) => {
             if int_range(p).is_some() || OTHER_PRIMITIVES.contains(&p.as_str()) {
                 Ok(())
@@ -145,12 +231,12 @@ fn layout_in(l: &Ipld, covered: bool) -> R<()> {
                                 "member {n}: has a rule inside a value merged whole by an enclosing rule"
                             ));
                         }
-                        (false, None) if !is_struct(ml) => {
+                        (false, None) if !is_struct(ml) && !lenient => {
                             return Err(format!("member {n}: has no merge rule"));
                         }
                         _ => {}
                     }
-                    layout_in(ml, covered || r.is_some()).map_err(|e| member_err(n, e))?;
+                    layout_in(ml, covered || r.is_some(), lenient).map_err(|e| member_err(n, e))?;
                 }
                 Ok(())
             } else if m.contains_key("enum") {
@@ -170,9 +256,53 @@ fn layout_in(l: &Ipld, covered: bool) -> R<()> {
                 if int(&m["count"], "array count")? < 0 {
                     return Err("negative array count".into());
                 }
-                layout_in(&m["array"], true)
+                layout_in(&m["array"], true, lenient)
             } else if m.contains_key("vector") {
-                layout_in(&exact(l, &["vector"], "vector layout")?["vector"], true)
+                layout_in(
+                    &exact(l, &["vector"], "vector layout")?["vector"],
+                    true,
+                    lenient,
+                )
+            } else if m.contains_key("option") {
+                layout_in(
+                    &exact(l, &["option"], "option layout")?["option"],
+                    true,
+                    lenient,
+                )
+            } else if m.contains_key("map") {
+                let [k, v] = list(&exact(l, &["map"], "map layout")?["map"], "map layout")? else {
+                    return Err("a map layout is not [key, value]".into());
+                };
+                layout_in(k, true, lenient).map_err(|e| member_err("key", e))?;
+                layout_in(v, true, lenient).map_err(|e| member_err("value", e))
+            } else if m.contains_key("union") {
+                let m = exact(l, &["union", "variants"], "union layout")?;
+                nullable(&m["union"], |v| text(v, "union name"))?;
+                let mut names = BTreeSet::new();
+                for x in list(&m["variants"], "variants")? {
+                    let [n, pl] = list(x, "variant")? else {
+                        return Err("a variant is not [name, layout | null]".into());
+                    };
+                    let n = text(n, "variant name")?;
+                    if !names.insert(n) {
+                        return Err(format!("variant {n:?} is listed twice"));
+                    }
+                    if !matches!(pl, Ipld::Null) {
+                        if !is_struct(pl) {
+                            return Err(format!(
+                                "variant {n}: its payload is not a struct or null"
+                            ));
+                        }
+                        layout_in(pl, true, lenient).map_err(|e| member_err(n, e))?;
+                    }
+                }
+                Ok(())
+            } else if m.contains_key("runtime") {
+                text(
+                    &exact(l, &["runtime"], "runtime layout")?["runtime"],
+                    "runtime name",
+                )
+                .map(|_| ())
             } else {
                 Err(format!(
                     "unknown layout kind with keys {:?}",
@@ -195,12 +325,56 @@ fn constants(v: &Ipld) -> R<()> {
     Ok(())
 }
 
+/// The base and version a type's path gives (SPEC.md, "Layouts"): a last segment ending in `V` and a decimal number
+/// not starting with 0 is that version of the path without the suffix; any other path is its own base at version 1.
+/// `FooV1` is refused (a second name for version 1 of `Foo`).
+pub fn base_version(path: &str) -> R<(String, u64)> {
+    // The last segment starts after the last `.` that is not escaped.
+    let bytes = path.as_bytes();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'.' => {
+                start = i + 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    let last = &path[start..];
+    let digits = last.bytes().rev().take_while(u8::is_ascii_digit).count();
+    let stem = &last[..last.len() - digits];
+    if digits == 0
+        || !stem.ends_with('V')
+        || stem.len() == 1
+        || last[last.len() - digits..].starts_with('0')
+    {
+        return Ok((path.to_string(), 1));
+    }
+    let version: u64 = last[last.len() - digits..]
+        .parse()
+        .map_err(|_| format!("type {path}: its version number is too large"))?;
+    if version == 1 {
+        return Err(format!(
+            "type {path}: V1 is not a version suffix (version 1 of a type is the type without one)"
+        ));
+    }
+    Ok((
+        format!("{}{}", &path[..start], &stem[..stem.len() - 1]),
+        version,
+    ))
+}
+
 /// A layout record (SPEC.md, "Layouts"), whose hash must be the first 8 bytes of SHA-256 over the record without it.
 pub fn layout_record(path: &str, rec: &Ipld) -> R<()> {
     let what = format!("layout {path}");
     let m = exact(
         rec,
         &[
+            "base",
+            "version",
             "layout",
             "merge",
             "sync",
@@ -210,6 +384,12 @@ pub fn layout_record(path: &str, rec: &Ipld) -> R<()> {
         ],
         &what,
     )?;
+    let (base, version) = base_version(path)?;
+    if m["base"] != Ipld::String(base.clone()) || m["version"] != Ipld::Integer(version as i128) {
+        return Err(format!(
+            "{what}: base and version must be {base:?} and {version}, which its path gives"
+        ));
+    }
     let merge = rule(&m["merge"], &format!("{what}: merge"))?;
     match (is_struct(&m["layout"]), merge) {
         (true, Some(_)) => {
@@ -220,7 +400,7 @@ pub fn layout_record(path: &str, rec: &Ipld) -> R<()> {
         (false, None) => return Err(format!("{what}: has no merge rule")),
         _ => {}
     }
-    layout_in(&m["layout"], merge.is_some()).map_err(|e| format!("{what}: {e}"))?;
+    layout_in(&m["layout"], merge.is_some(), false).map_err(|e| format!("{what}: {e}"))?;
     let mode = text(&m["sync"], &format!("{what}: sync"))?;
     Mode::from_name(mode).ok_or_else(|| format!("{what}: {mode:?} is not a sync mode"))?;
     nullable(&m["writable_by"], |v| reference(v, "writable_by"))?;
@@ -257,7 +437,7 @@ pub fn value(v: &Ipld, l: &Ipld, blobs: Blobs) -> R<()> {
             }
             let ok = match (p, v) {
                 ("bool", Ipld::Bool(_)) => true,
-                ("f32" | "f64", Ipld::Float(f)) => f.is_finite(),
+                (p, Ipld::Float(f)) if is_float(p) => f.is_finite(),
                 ("string", Ipld::String(_) | Ipld::Null) => true,
                 ("entity", Ipld::Null) | ("id", Ipld::Null) => true,
                 ("entity", r) => return reference(r, "entity value"),
@@ -339,6 +519,59 @@ pub fn value(v: &Ipld, l: &Ipld, blobs: Blobs) -> R<()> {
             .try_for_each(|(i, x)| {
                 value(x, &m["vector"], blobs).map_err(|e| member_err(&format!("[{i}]"), e))
             }),
+        Ipld::Map(m) if m.contains_key("option") => match list(v, "option value")? {
+            [] => Ok(()),
+            [x] => value(x, &m["option"], blobs),
+            _ => Err("an option value has more than one element".into()),
+        },
+        Ipld::Map(m) if m.contains_key("union") => {
+            let Ipld::Map(vm) = v else {
+                return Err("a union value is not a map".into());
+            };
+            let mut it = vm.iter();
+            let (Some((n, x)), None) = (it.next(), it.next()) else {
+                return Err("a union value does not have exactly one variant".into());
+            };
+            for var in list(&m["variants"], "variants")? {
+                if let [Ipld::String(vn), pl] = list(var, "variant")?
+                    && vn == n
+                {
+                    return match (pl, x) {
+                        (Ipld::Null, Ipld::Null) => Ok(()),
+                        (Ipld::Null, _) => Err(format!(
+                            "variant {n} has no payload, but the value gives one"
+                        )),
+                        (pl, x) => value(x, pl, blobs).map_err(|e| member_err(n, e)),
+                    };
+                }
+            }
+            Err(format!("{n:?} is not a variant of the union"))
+        }
+        Ipld::Map(m) if m.contains_key("map") => {
+            let Some(Ipld::List(kv)) = m.get("map") else {
+                return Err("bad map layout".into());
+            };
+            let mut last: Option<Vec<u8>> = None;
+            for (i, e) in list(v, "map value")?.iter().enumerate() {
+                let [k, x] = list(e, "map entry")? else {
+                    return Err(format!("map entry {i} is not [key, value]"));
+                };
+                value(k, &kv[0], blobs).map_err(|e| member_err(&format!("[{i}].key"), e))?;
+                value(x, &kv[1], blobs).map_err(|e| member_err(&format!("[{i}].value"), e))?;
+                let b = encode(k);
+                if last.as_ref().is_some_and(|l| *l >= b) {
+                    return Err(format!(
+                        "map entry {i}: keys are not unique and sorted by their DAG-CBOR encoding"
+                    ));
+                }
+                last = Some(b);
+            }
+            Ok(())
+        }
+        Ipld::Map(m) if m.contains_key("runtime") => match v {
+            Ipld::Null => Ok(()),
+            _ => Err("a runtime value is not null".into()),
+        },
         _ => Err("unknown layout".into()),
     }
 }
@@ -413,6 +646,61 @@ pub fn entity(v: &Ipld, form: Form, layouts: &BTreeMap<String, Ipld>) -> R<()> {
         _ => return Err("entity id is not 16 bytes or null".into()),
     }
     nullable(&m["name"], |v| text(v, "name"))?;
+    parts(m, layouts)?;
+    let inh = exact(
+        &m["inherited"],
+        &["tags", "components", "pairs"],
+        "inherited",
+    )?;
+    for t in list(&inh["tags"], "inherited tags")? {
+        reference(t, "inherited tag")?;
+    }
+    for c in list(&inh["components"], "inherited components")? {
+        text(c, "inherited component")?;
+    }
+    for p in list(&inh["pairs"], "inherited pairs")? {
+        let [r, t] = list(p, "inherited pair")? else {
+            return Err("an inherited pair is not [rel, tgt]".into());
+        };
+        reference(r, "relationship")?;
+        reference(t, "target")?;
+    }
+    match form {
+        Form::Document => {
+            text(&m["path"], "path")?;
+            nullable(&m["parent"], |v| int(v, "parent"))?;
+        }
+        Form::Block => match &m["children"] {
+            Ipld::Map(_) => {
+                let c = exact(&m["children"], &["mst"], "children")?;
+                match &c["mst"] {
+                    Ipld::Link(l) if l.codec() == DAG_CBOR => {}
+                    _ => return Err("children's mst is not a dag-cbor link".into()),
+                }
+            }
+            v => {
+                let kids = list(v, "children")?;
+                if kids.len() > crate::walk::MAX_CHILDREN {
+                    return Err(format!(
+                        "an inline child list has {} children; past {} it must be a Merkle Search Tree",
+                        kids.len(),
+                        crate::walk::MAX_CHILDREN
+                    ));
+                }
+                for c in kids {
+                    match list(c, "child")? {
+                        [Ipld::String(_), Ipld::Link(l)] if l.codec() == DAG_CBOR => {}
+                        _ => return Err("a child is not [segment, dag-cbor link]".into()),
+                    }
+                }
+            }
+        },
+    }
+    Ok(())
+}
+
+/// The parts every entity record has (tags, pairs, components, isa), checked against the layouts.
+fn parts(m: &BTreeMap<String, Ipld>, layouts: &BTreeMap<String, Ipld>) -> R<()> {
     for t in list(&m["tags"], "tags")? {
         reference(t, "tag")?;
     }
@@ -445,37 +733,49 @@ pub fn entity(v: &Ipld, form: Form, layouts: &BTreeMap<String, Ipld>) -> R<()> {
     for r in list(&m["isa"], "isa")? {
         reference(r, "isa")?;
     }
-    let inh = exact(
-        &m["inherited"],
-        &["tags", "components", "pairs"],
-        "inherited",
+    Ok(())
+}
+
+/// A host record (SPEC.md, "Host record"); returns its id.
+pub fn host_entity(v: &Ipld, layouts: &BTreeMap<String, Ipld>) -> R<[u8; 16]> {
+    let m = exact(
+        v,
+        &["id", "name", "parent", "tags", "pairs", "components", "isa"],
+        "host record",
     )?;
-    for t in list(&inh["tags"], "inherited tags")? {
-        reference(t, "inherited tag")?;
-    }
-    for c in list(&inh["components"], "inherited components")? {
-        text(c, "inherited component")?;
-    }
-    for p in list(&inh["pairs"], "inherited pairs")? {
-        let [r, t] = list(p, "inherited pair")? else {
-            return Err("an inherited pair is not [rel, tgt]".into());
-        };
-        reference(r, "relationship")?;
-        reference(t, "target")?;
-    }
-    match form {
-        Form::Document => {
-            text(&m["path"], "path")?;
-            nullable(&m["parent"], |v| int(v, "parent"))?;
+    let id: [u8; 16] = match &m["id"] {
+        Ipld::Bytes(b) => b
+            .as_slice()
+            .try_into()
+            .map_err(|_| "host record id is not 16 bytes")?,
+        _ => return Err("host record id is not 16 bytes".into()),
+    };
+    nullable(&m["name"], |v| text(v, "name"))?;
+    nullable(&m["parent"], |v| reference(v, "parent"))?;
+    parts(m, layouts)?;
+    Ok(id)
+}
+
+/// A host document (SPEC.md, "Host document"): the version, the id component's path, every layout and every host
+/// record, entities strictly increasing by id.
+pub fn host_document(doc: &Ipld) -> R<()> {
+    let m = exact(
+        doc,
+        &["version", "ids", "layouts", "entities"],
+        "host document",
+    )?;
+    version(m, "the host document")?;
+    text(&m["ids"], "ids")?;
+    let ls = layouts(m.get("layouts"))?;
+    let mut last: Option<[u8; 16]> = None;
+    for (i, e) in list(&m["entities"], "entities")?.iter().enumerate() {
+        let id = host_entity(e, ls).map_err(|err| format!("entity {i}: {err}"))?;
+        if last.is_some_and(|l| l >= id) {
+            return Err(format!(
+                "entity {i}: entities are not in increasing id order"
+            ));
         }
-        Form::Block => {
-            for c in list(&m["children"], "children")? {
-                match list(c, "child")? {
-                    [Ipld::String(_), Ipld::Link(l)] if l.codec() == DAG_CBOR => {}
-                    _ => return Err("a child is not [segment, dag-cbor link]".into()),
-                }
-            }
-        }
+        last = Some(id);
     }
     Ok(())
 }

@@ -9,10 +9,11 @@ use ipld_core::ipld::Ipld;
 use sha2::{Digest, Sha256};
 
 use crate::check::{self, Form};
-use crate::walk::{Snapshot, encode};
+use crate::mst;
+use crate::walk::{MAX_CHILDREN, Snapshot, encode};
 
 /// The format version every document, root block and change block carries.
-pub const VERSION: u64 = 1;
+pub const VERSION: u64 = 2;
 
 /// Multicodec codes: DAG-CBOR blocks, and raw blocks (blob chunks).
 pub const DAG_CBOR: u64 = 0x71;
@@ -87,21 +88,44 @@ pub fn blocks(snap: Snapshot) -> Blocks {
     let n = snap.items.len();
     let mut cids: Vec<Option<Cid>> = vec![None; n];
     let mut bytes: Vec<Vec<u8>> = vec![Vec::new(); n];
+    let mut tree_blocks = Vec::new();
     // Items are in pre-order, so children come after their parent: hash in reverse.
     for i in (0..n).rev() {
         let it = &snap.items[i];
-        let children = it
-            .children
-            .iter()
-            .map(|c| {
-                Ipld::List(vec![
-                    Ipld::String(snap.items[*c].segment.clone()),
-                    Ipld::Link(cids[*c].unwrap()),
-                ])
-            })
-            .collect();
+        let children = if it.children.len() > MAX_CHILDREN {
+            // Past the threshold the list is an MST keyed by segment (SPEC.md, "Large child sets"); the walk refused
+            // an ordered parent, and segments are already in bytewise order.
+            let mut entries: Vec<(Vec<u8>, Cid)> = it
+                .children
+                .iter()
+                .map(|c| {
+                    (
+                        snap.items[*c].segment.clone().into_bytes(),
+                        cids[*c].unwrap(),
+                    )
+                })
+                .collect();
+            entries.sort();
+            let (root, nodes) = mst::build(&entries).expect("unique sorted segments");
+            tree_blocks.extend(nodes);
+            let mut m = BTreeMap::new();
+            m.insert(key("mst"), Ipld::Link(root));
+            Ipld::Map(m)
+        } else {
+            Ipld::List(
+                it.children
+                    .iter()
+                    .map(|c| {
+                        Ipld::List(vec![
+                            Ipld::String(snap.items[*c].segment.clone()),
+                            Ipld::Link(cids[*c].unwrap()),
+                        ])
+                    })
+                    .collect(),
+            )
+        };
         let mut rec = it.record.clone();
-        rec.insert(key("children"), Ipld::List(children));
+        rec.insert(key("children"), children);
         let b = encode(&Ipld::Map(rec));
         cids[i] = Some(cid_of(&b));
         bytes[i] = b;
@@ -130,7 +154,7 @@ pub fn blocks(snap: Snapshot) -> Blocks {
             out.push((c, b));
         }
     }
-    for (c, b) in snap.blobs {
+    for (c, b) in tree_blocks.into_iter().chain(snap.blobs) {
         if seen.insert(c) {
             out.push((c, b));
         }
@@ -218,7 +242,7 @@ pub struct Difference {
 }
 
 /// A block's bytes from the store, checked against its CID (any codec).
-fn fetch(s: &dyn BlockStore, c: &Cid) -> Result<Vec<u8>, String> {
+pub(crate) fn fetch(s: &dyn BlockStore, c: &Cid) -> Result<Vec<u8>, String> {
     let b = s.get(c).ok_or_else(|| format!("block {c} is missing"))?;
     if c.hash().code() != SHA2_256 || cid_with(c.codec(), &b) != *c {
         return Err(format!("block {c} does not hash to its CID"));
@@ -290,6 +314,24 @@ fn pairs(v: Option<&Ipld>) -> Result<Vec<(String, Cid)>, String> {
         .collect()
 }
 
+/// An entity block's children, inline or from their MST.
+fn child_list(s: &dyn BlockStore, v: Option<&Ipld>) -> Result<Vec<(String, Cid)>, String> {
+    if let Some(Ipld::Map(m)) = v {
+        let Some(Ipld::Link(root)) = m.get("mst") else {
+            return Err("children is neither a list nor {\"mst\": link}".into());
+        };
+        return mst::read(s, root)?
+            .into_iter()
+            .map(|(k, c)| {
+                String::from_utf8(k)
+                    .map(|k| (k, c))
+                    .map_err(|_| "a child segment in the MST is not UTF-8".to_string())
+            })
+            .collect();
+    }
+    pairs(v)
+}
+
 /// What differs between two roots, reading only blocks whose CIDs differ.
 pub fn diff(s: &dyn BlockStore, a: &Cid, b: &Cid) -> Result<Vec<Difference>, String> {
     let mut out = Vec::new();
@@ -357,7 +399,10 @@ fn children(
                     load_entity(s, x, layouts.0, &path)?,
                     load_entity(s, y, layouts.1, &path)?,
                 );
-                let (ka, kb) = (pairs(ea.get("children"))?, pairs(eb.get("children"))?);
+                let (ka, kb) = (
+                    child_list(s, ea.get("children"))?,
+                    child_list(s, eb.get("children"))?,
+                );
                 ea.remove("children");
                 eb.remove("children");
                 if ea != eb {

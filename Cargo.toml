@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/flecs-c", "crates/flecs-snapshot", "merge"]
+members = ["crates/flecs-c", "crates/flecs-snapshot", "crates/flecs-describe", "crates/flecs-describe-derive", "merge"]
+exclude = ["host-check"]
 
 [profile.release]
 opt-level = "s"
