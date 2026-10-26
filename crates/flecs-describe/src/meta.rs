@@ -664,6 +664,45 @@ impl Refs for PathRefs {
     }
 }
 
+/// The most elements (of lists, byte strings and maps, at every depth) one component's value writes into JSON.
+///
+/// The JSON form is for display (REST, `ecs_world_to_json`): an opaque type has no assign callback, so nothing reads
+/// it back. Flecs builds the whole reply in one `ecs_strbuf_t`, whose size is an `int32_t`, and a described value can
+/// be far bigger than that: a planet's atlas is 26 million `f32` (`Vec<f32>`), about 500 MB as JSON, so a world with
+/// two of them passed 2 GiB and aborted the process inside Flecs (`flecs_strbuf_grow`). Past this budget a list, byte
+/// string or map is written as one string saying how many elements it holds; the rest of the value is shown as is.
+pub const JSON_ELEMENTS: usize = 1 << 16;
+
+/// What an elided list, byte string or map is shown as.
+fn elided(n: usize) -> Ipld {
+    Ipld::String(format!(
+        "{n} elements, not shown (a described value shows at most {JSON_ELEMENTS} in JSON)"
+    ))
+}
+
+/// `v`, in order, with every list, byte string or map that would take it past `budget` elements replaced by
+/// [`elided`]; `budget` is what is left.
+fn clip(v: Ipld, budget: &mut usize) -> Ipld {
+    match v {
+        Ipld::List(items) if items.len() > *budget => elided(items.len()),
+        Ipld::Bytes(b) if b.len() > *budget => elided(b.len()),
+        Ipld::Map(m) if m.len() > *budget => elided(m.len()),
+        Ipld::List(items) => {
+            *budget -= items.len();
+            Ipld::List(items.into_iter().map(|x| clip(x, budget)).collect())
+        }
+        Ipld::Bytes(b) => {
+            *budget -= b.len();
+            Ipld::Bytes(b)
+        }
+        Ipld::Map(m) => {
+            *budget -= m.len();
+            Ipld::Map(m.into_iter().map(|(k, x)| (k, clip(x, budget))).collect())
+        }
+        x => x,
+    }
+}
+
 /// The serialize callback of a component of described type T.
 unsafe extern "C" fn ser_component<T: Describe>(
     ser: *const sys::ecs_serializer_t,
@@ -676,9 +715,23 @@ unsafe extern "C" fn ser_component<T: Describe>(
     let Ok(v) = t.read(&mut PathRefs(w)) else {
         return -1;
     };
+    let shape = shape(&T::layout());
+    // A list-shaped value is written as elements of a JSON array, so when it is itself too long the array holds the
+    // one string that says so.
+    let top_len = match (shape, &v) {
+        (Shape::List, Ipld::List(items)) => items.len(),
+        (Shape::List, Ipld::Bytes(b)) => b.len(),
+        _ => 0,
+    };
+    if top_len > JSON_ELEMENTS {
+        // SAFETY: as above.
+        return unsafe { emit_elements(ser, &[elided(top_len)]) };
+    }
+    let mut budget = JSON_ELEMENTS;
+    let v = clip(v, &mut budget);
     // SAFETY: as above.
     unsafe {
-        match (shape(&T::layout()), &v) {
+        match (shape, &v) {
             (Shape::Map, Ipld::Map(m)) => emit_members(ser, m),
             (Shape::List, Ipld::List(items)) => emit_elements(ser, items),
             (Shape::List, Ipld::Bytes(b)) => emit_elements(

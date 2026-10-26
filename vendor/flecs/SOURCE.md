@@ -7,6 +7,10 @@
 - `rgb-fork.patch`: upstream `ed776dd` (#2219), no opaque callbacks under a meta cursor with no data;
 - exact JSON floats (`flecs_json_ser_float`; JSON is not compiled here);
 - `rgb-rest-gate.patch`: REST writes gated (REST is not compiled here);
+- string buffer growth checked (`flecs_strbuf_grow`): the `int32_t` size no longer wraps past 1 GiB into a NULL
+  buffer that later asserts `b->content != NULL`; it grows to at most `INT32_MAX` and aborts naming the cause
+  (`ECS_OUT_OF_MEMORY`) when it cannot grow or the allocation fails. Added 2026-10-26 upstream first: the game's
+  `vendor/flecs_ecs_sys/src/flecs.c` needs the same hunk to stay byte for byte equal;
 - wasm: a plain `__wasm__` target sets `ECS_TARGET_WASM` and `ECS_TARGET_POSIX`, and no `execinfo.h` there.
 
 One pin for both repositories, so a host that links its own Flecs (the `host` feature of `flecs-c`, SPEC.md "Host

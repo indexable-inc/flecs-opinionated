@@ -35698,14 +35698,36 @@ void flecs_strbuf_grow(
     if (!b->content) {
         b->content = b->small_string;
         b->size = ECS_STRBUF_SMALL_STRING_SIZE;
-    } else if (b->content == b->small_string) {
-        b->size *= 2;
-        b->content = ecs_os_malloc_n(char, b->size);
-        ecs_os_memcpy(b->content, b->small_string, b->length);
     } else {
-        b->size *= 2;
-        if (b->size < 16) b->size = 16;
-        b->content = ecs_os_realloc_n(b->content, char, b->size);
+        /* rgb fork: the size is an int32_t. Doubled past 1 GiB it wrapped
+         * negative (signed overflow, so the "< 16" clamp could be folded
+         * away), the allocator refused the negative size, and the NULL it
+         * returned was stored: `size - length` wrapped positive, the append
+         * went on and flecs_strbuf_ptr asserted content != NULL, far from the
+         * cause. Grow to at most INT32_MAX and abort, naming the cause, when
+         * the buffer cannot grow or the allocation fails. */
+        int64_t size = (int64_t)b->size * 2;
+        if (size < 16) size = 16;
+        if (size > INT32_MAX) size = INT32_MAX;
+        if (size <= b->size) {
+            ecs_abort(ECS_OUT_OF_MEMORY,
+                "string buffer cannot grow past %d bytes", b->size);
+        }
+        char *content;
+        if (b->content == b->small_string) {
+            content = ecs_os_malloc_n(char, (int32_t)size);
+            if (content) {
+                ecs_os_memcpy(content, b->small_string, b->length);
+            }
+        } else {
+            content = ecs_os_realloc_n(b->content, char, (int32_t)size);
+        }
+        if (!content) {
+            ecs_abort(ECS_OUT_OF_MEMORY,
+                "string buffer: allocating %d bytes failed", (int32_t)size);
+        }
+        b->content = content;
+        b->size = (int32_t)size;
     }
 }
 

@@ -56,7 +56,7 @@ mod glamx_impls;
 mod half_impls;
 
 pub use catalog::Catalog;
-pub use meta::{Flecs, FlecsMember, FlecsStruct};
+pub use meta::{Flecs, FlecsMember, FlecsStruct, JSON_ELEMENTS};
 pub use register::{Swept, component, describe_all, path_of, register};
 
 pub type R<T> = Result<T, String>;
