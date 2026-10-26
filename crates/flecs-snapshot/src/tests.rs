@@ -620,3 +620,14 @@ fn compat_table() {
     assert_eq!(v.compat, Compat::NeedsCheck);
     assert!(!m.is_empty());
 }
+
+/// `World::layout_record` is the record a document carries for the type, so a writer typing values by it and a
+/// reader checking them by the document agree.
+#[test]
+fn layout_record_matches_the_document() {
+    let w = world(SITE);
+    let doc = w.document(&["site"]).unwrap();
+    let want = field(field(&doc, "layouts"), "Card");
+    assert_eq!(&w.layout_record("Card").unwrap(), want);
+    assert!(w.layout_record("NoSuchType").is_err());
+}

@@ -208,6 +208,14 @@ impl World {
         Ok(())
     }
 
+    /// The layout record (SPEC.md, "Layouts") of the type at path `ty`, as a document holds it: the shape `set`
+    /// checks a value of it against, and what `compare` classifies a change of. A writer that holds values in
+    /// another encoding (JSON has no integer/float distinction) reads it to type them before `set`.
+    pub fn layout_record(&self, ty: &str) -> Result<Ipld, String> {
+        let t = self.lookup(ty)?;
+        Walk::new(self.w, &self.schema).layout_record_of(t)
+    }
+
     /// The world's raw pointer, for describing types in it (`crate::described::describe`) and for tests.
     #[doc(hidden)]
     pub fn as_ptr(&mut self) -> *mut ecs_world_t {
