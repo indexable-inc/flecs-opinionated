@@ -239,6 +239,13 @@ unsafe extern "C" {
     pub fn ecs_meta_set_entity(c: *mut ecs_meta_cursor_t, v: ecs_entity_t) -> c_int;
     pub fn ecs_meta_set_id(c: *mut ecs_meta_cursor_t, v: ecs_id_t) -> c_int;
     pub fn ecs_meta_set_null(c: *mut ecs_meta_cursor_t) -> c_int;
+    // the read half: the value at the cursor's place, converted to the asked type.
+    pub fn ecs_meta_get_bool(c: *const ecs_meta_cursor_t) -> bool;
+    pub fn ecs_meta_get_int(c: *const ecs_meta_cursor_t) -> i64;
+    pub fn ecs_meta_get_uint(c: *const ecs_meta_cursor_t) -> u64;
+    pub fn ecs_meta_get_float(c: *const ecs_meta_cursor_t) -> f64;
+    pub fn ecs_meta_get_string(c: *const ecs_meta_cursor_t) -> *const c_char;
+    pub fn ecs_meta_get_entity(c: *const ecs_meta_cursor_t) -> ecs_entity_t;
     pub fn glue_member_offset(which: i32) -> usize;
 
     pub fn ecs_init() -> *mut ecs_world_t;
@@ -677,6 +684,41 @@ mod tests {
     extern crate std;
     use super::*;
     use core::mem::{align_of, offset_of, size_of};
+
+    #[test]
+    fn a_cursor_reads_back_each_member_kind_a_script_set() {
+        let code = c"struct S {\n b = bool\n i = i32\n u = u64\n f = f32\n s = string\n e = entity\n}\nt {}\nx { S: {b: true, i: -3, u: 7, f: 2.5, s: \"hi\", e: t} }\n";
+        // SAFETY: a fresh world, NUL-terminated strings, and a cursor over x's own S, freed before the world.
+        unsafe {
+            let w = ecs_init();
+            assert_eq!(
+                ecs_script_run(w, c"t".as_ptr(), code.as_ptr(), core::ptr::null_mut()),
+                0
+            );
+            let (ty, x, t) = (
+                ecs_lookup(w, c"S".as_ptr()),
+                ecs_lookup(w, c"x".as_ptr()),
+                ecs_lookup(w, c"t".as_ptr()),
+            );
+            let c = glue_cursor_new(w, ty, ecs_get_mut_id(w, x, ty));
+            assert_eq!(ecs_meta_push(c), 0);
+            let at = |m: &core::ffi::CStr| assert_eq!(ecs_meta_member(c, m.as_ptr()), 0);
+            at(c"b");
+            assert!(ecs_meta_get_bool(c));
+            at(c"i");
+            assert_eq!(ecs_meta_get_int(c), -3);
+            at(c"u");
+            assert_eq!(ecs_meta_get_uint(c), 7);
+            at(c"f");
+            assert_eq!(ecs_meta_get_float(c), 2.5);
+            at(c"s");
+            assert_eq!(core::ffi::CStr::from_ptr(ecs_meta_get_string(c)), c"hi");
+            at(c"e");
+            assert_eq!(ecs_meta_get_entity(c), t);
+            glue_cursor_free(c);
+            ecs_fini(w);
+        }
+    }
 
     #[test]
     fn layouts_match_c() {
