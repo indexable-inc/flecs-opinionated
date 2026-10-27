@@ -1,7 +1,9 @@
 //! Compiles Flecs's amalgamated source (vendor/flecs/distr/flecs.c, upstream master: vendor/flecs/SOURCE.md) and csrc/glue.c with cc, for the host
 //! and for wasm32-unknown-unknown. Adapted from den's vendor/hyperion-flecs-c/build.rs.
 //!
-//! Addons: FLECS_CUSTOM_BUILD plus LOG (error messages), SCRIPT (which pulls in META, DOC and PARSER) and PREFAB.
+//! Addons: FLECS_CUSTOM_BUILD plus LOG (error messages), SCRIPT (which pulls in META, DOC and PARSER), PREFAB and
+//! CONSTRAINT_TRAITS (OneOf, Final, Symmetric, Acyclic, Trait, Relationship, Target: without it a custom build has no
+//! such entities, and a script naming one fails with "unresolved reference").
 //! META with PREFAB pulls in QUERY_PLANS (Flecs's addon_defines.h): meta's observers match inherited parts, which
 //! need a query plan. No JSON, REST, HTTP, systems or pipeline: nothing here needs threads or a clock.
 //!
@@ -80,6 +82,7 @@ fn main() {
         .define("FLECS_LOG", None)
         .define("FLECS_SCRIPT", None)
         .define("FLECS_PREFAB", None)
+        .define("FLECS_CONSTRAINT_TRAITS", None)
         .define("NDEBUG", None)
         .define("FLECS_KEEP_ASSERT", None)
         .define("FLECS_SOFT_ASSERT", None)
