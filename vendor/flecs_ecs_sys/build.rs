@@ -233,8 +233,8 @@ fn generate_bindings(c_debug: bool, out_file: &str) {
 
 fn main() {
     // Tell cargo to invalidate the built crate whenever the sources change
-    println!("cargo:rerun-if-changed=../flecs/distr/flecs.h");
-    println!("cargo:rerun-if-changed=../flecs/distr/flecs.c");
+    println!("cargo:rerun-if-changed=src/flecs.h");
+    println!("cargo:rerun-if-changed=src/flecs.c");
     println!("cargo:rerun-if-changed=src/flecs_rust.h");
     println!("cargo:rerun-if-changed=src/flecs_rust.c");
     println!("cargo:rerun-if-changed=build.rs");
@@ -425,8 +425,6 @@ fn main() {
             build.flag_if_supported("-fasynchronous-unwind-tables");
         }
 
-        // flecs-opinionated: the amalgamation is vendor/flecs/distr, shared with crates/flecs-c (SOURCE.md).
-        build.include("../flecs/distr");
 
         build.compile("flecs");
 

@@ -1,28 +1,31 @@
-# Flecs C, the game's pin
+# Flecs C, upstream master
 
-`distr/flecs.c` and `distr/flecs.h` are byte for byte the amalgamation the space game links
-(`the-game/vendor/flecs_ecs_sys/src/`, flecs_ecs_sys 0.2.1 at Flecs-Rust `bf956db`): Flecs C master
-`6e4cd338a` (4.1.6) plus the game's fork changes, each marked `rgb fork` or `rgb:` in the source:
+`distr/flecs.c` and `distr/flecs.h` are the amalgamation from Flecs C master `72a531d6f706c19629f15f3d49cb12a8d5dbe5e1`
+("[script] Use Parent hierarchy by default for prefab and template scopes", 2026-10-27; 645 commits past `6e4cd338a`,
+which is what 4.1.6 shipped as; `FLECS_VERSION_*` still says 4.1.6), copied from upstream's `distr/` with the local
+changes in `local.patch` (`git apply -p1 --directory=vendor/flecs local.patch` onto upstream's two files), each marked
+`local:` in the source:
 
-- `rgb-fork.patch`: upstream `ed776dd` (#2219), no opaque callbacks under a meta cursor with no data;
-- exact JSON floats (`flecs_json_ser_float`; JSON is not compiled here);
-- `rgb-rest-gate.patch`: REST writes gated (REST is not compiled here);
-- string buffer growth checked (`flecs_strbuf_grow`): the `int32_t` size no longer wraps past 1 GiB into a NULL
-  buffer that later asserts `b->content != NULL`; it grows to at most `INT32_MAX` and aborts naming the cause
-  (`ECS_OUT_OF_MEMORY`) when it cannot grow or the allocation fails. Added 2026-10-26 upstream first: the game's
-  `vendor/flecs_ecs_sys/src/flecs.c` needs the same hunk to stay byte for byte equal;
-- wasm: a plain `__wasm__` target sets `ECS_TARGET_WASM` and `ECS_TARGET_POSIX`, and no `execinfo.h` there.
+- wasm: a plain `__wasm__` target (wasm32-unknown-unknown, `crates/flecs-c/wasm-libc`) sets `ECS_TARGET_WASM` and
+  `ECS_TARGET_POSIX`, and includes no `execinfo.h`. Upstream knows only Emscripten.
+- string buffer growth checked (`flecs_strbuf_grow`): the `int32_t` size no longer wraps past 1 GiB into a NULL buffer
+  that later asserts `b->content != NULL`; it grows to at most `INT32_MAX` and aborts naming the cause
+  (`ECS_OUT_OF_MEMORY`) when it cannot grow or the allocation fails. Upstream still doubles an `int32_t`.
 
-One pin for both repositories, so a host that links its own Flecs (the `host` feature of `flecs-c`, SPEC.md "Host
-worlds") runs this library's glue against the same headers and the same code it was tested with. When the game moves
-its pin, copy its two files here in the same change, and the other way round.
+Dropped from the old pin (the space game's fork of 4.1.6):
 
-What this pin does not have that later Flecs does (scripts and tests here are written for the pin):
+- `rgb-fork.patch`, upstream `ed776dd` (#2219, no opaque callbacks under a meta cursor with no data): upstream has it.
+- exact JSON floats and `rgb-rest-gate.patch` (REST writes gated): the JSON and REST addons are not compiled here
+  (`crates/flecs-c/build.rs`), so the hunks changed nothing this library runs.
+- the Flecs-Rust `FLECS_MUT_ALIAS_LOCKS` hunks the game's copy carries: this library never defines it.
 
-- the type shorthand `struct P(x: f32)`, `enum E(A, B)`, `vector V(type: u8)`. Write `struct P {\n  x = f32\n}`,
-  `enum E {\n  A, B\n}`, `V = vector: {type: u8}`, an inline array member as `m = member: {type: i32, count: 2}`
-  and an enum constant's value as `A { (constant, i32): {5} }`;
-- a range check on integer literals: past u64 the value saturates at u64::MAX (strtoull without ERANGE) instead of
-  being refused. Native and wasm agree.
+To move the pin: copy upstream's `distr/flecs.c` and `distr/flecs.h`, apply `local.patch` (refresh it if a hunk
+moved), update the commit above, and run `uv run build.py --test`.
+
+The space game's pin is separate and behind: Flecs C `6e4cd338a` (4.1.6) plus its fork, in the game's
+`vendor/flecs_ecs_sys/src/`. A copy of those two files is `../flecs_ecs_sys/src/flecs.{c,h}`, which host-check builds
+so that host mode (the `host` feature of `flecs-c`, SPEC.md "Host worlds") is still checked against the game's Flecs:
+in host mode `crates/flecs-c` compiles `csrc/glue.c` against the host's `flecs.h`, not this one. Nothing requires the
+two pins to be equal any more.
 
 Licence: MIT (Sander Mertens), `LICENSE`.

@@ -1,4 +1,4 @@
-//! Compiles Flecs's amalgamated source (vendor/flecs/distr/flecs.c, the space game's pin: vendor/flecs/SOURCE.md) and csrc/glue.c with cc, for the host
+//! Compiles Flecs's amalgamated source (vendor/flecs/distr/flecs.c, upstream master: vendor/flecs/SOURCE.md) and csrc/glue.c with cc, for the host
 //! and for wasm32-unknown-unknown. Adapted from den's vendor/hyperion-flecs-c/build.rs.
 //!
 //! Addons: FLECS_CUSTOM_BUILD plus LOG (error messages), SCRIPT (which pulls in META, DOC and PARSER) and PREFAB. No
@@ -20,23 +20,28 @@ use std::path::PathBuf;
 
 fn main() {
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
-    // This repo's pin (vendor/flecs/distr), or, when the crate is vendored into a host's tree next to its
-    // flecs_ecs_sys (`<vendor>/flecs-opinionated/crates/flecs-c` beside `<vendor>/flecs_ecs_sys`), the host's own
-    // amalgamation, so a vendored copy needs no edit here.
-    let flecs = ["../../vendor/flecs/distr", "../../../flecs_ecs_sys/src"]
+    // Host mode compiles glue.c against the host's own flecs.h: the game's tree (`<vendor>/flecs-opinionated/crates/
+    // flecs-c` beside `<vendor>/flecs_ecs_sys`) or host-check's copy of it (vendor/flecs_ecs_sys). Otherwise this
+    // repo's pin (vendor/flecs/distr), or, vendored into a host's tree, the host's amalgamation.
+    let host = env::var_os("CARGO_FEATURE_HOST").is_some();
+    let candidates: &[&str] = if host {
+        &["../../../flecs_ecs_sys/src", "../../vendor/flecs_ecs_sys/src"]
+    } else {
+        &["../../vendor/flecs/distr", "../../../flecs_ecs_sys/src"]
+    };
+    let flecs = candidates
         .iter()
         .map(|p| root.join(p))
         .find(|d| d.join("flecs.h").is_file())
         .unwrap_or_else(|| {
             panic!(
-                "flecs.h not found under {} or {} (vendored: vendor/flecs/SOURCE.md)",
-                root.join("../../vendor/flecs/distr").display(),
-                root.join("../../../flecs_ecs_sys/src").display()
+                "flecs.h not found under any of {candidates:?} from {} (vendored: vendor/flecs/SOURCE.md)",
+                root.display()
             )
         });
     let target = env::var("TARGET").expect("TARGET");
     let mut b = cc::Build::new();
-    if env::var_os("CARGO_FEATURE_HOST").is_some() {
+    if host {
         // Host mode: only the glue, against the host's Flecs (flecs_ecs_sys, which this crate depends on, so the
         // linker sees glue before Flecs). The defines that change Flecs's struct layouts must match the host's
         // build: flecs_ecs_sys compiles FLECS_DEBUG unless the profile is release (its build.rs), and FLECS_CPP.

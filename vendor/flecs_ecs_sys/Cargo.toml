@@ -1,5 +1,5 @@
 # flecs_ecs_sys 0.2.1 as the space game vendors it (vendor/flecs_ecs_sys/SOURCE.md), for host-check only: the C
-# amalgamation is this repository's vendor/flecs/distr, and the game's rgb-build-flags dependency is dropped.
+# amalgamation in src/ is the game's pin (not vendor/flecs/distr), and the game's rgb-build-flags dependency is dropped.
 [package]
 name = "flecs_ecs_sys"
 version = "0.2.1"
