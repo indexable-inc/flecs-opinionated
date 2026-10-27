@@ -984,7 +984,7 @@ impl<'s> Walk<'s> {
                         id
                     };
                     // Flecs finds a base's part through IsA only when it is (OnInstantiate, Inherit); the default
-                    // (Override) copies it onto the instance, so the instance owns it.
+                    // (Copy, once called Override) copies it onto the instance, so the instance owns it.
                     if !self.has(comp, sys::pair(self.b.on_instantiate, self.b.inherit)) {
                         continue;
                     }

@@ -1017,9 +1017,9 @@ impl Host {
     pub fn restore(&mut self, doc: &[u8], m: &Migrations, opts: &mut Restore) -> R<Restored> {
         let w = self.w;
         // SAFETY: plain query.
-        if unsafe { sys::ecs_is_deferred(w) } {
+        if unsafe { sys::glue_is_deferred(w) } {
             return Err(
-                "the world is deferred (in a system or defer_begin): restore outside one".into(),
+                "the world is deferred (a stage, or in a system or observer): restore outside one".into(),
             );
         }
         let raw = parse_doc(doc).map_err(|e| format!("the document: {e}"))?;
@@ -1267,9 +1267,10 @@ impl Host {
                 naming: None,
             },
         );
-        // Each entity's parts are added under defer, so Flecs moves it to its final table once.
+        // Each entity's parts are added as one batch (a stage, or defer on a host's 4.1.6), so Flecs moves it to its
+        // final table once. Reads still go to `w`.
         // SAFETY: the world is not deferred (restore checked) and not in use elsewhere.
-        unsafe { sys::ecs_defer_begin(w) };
+        let bw = unsafe { sys::glue_batch_begin(w) };
         // Per entity: the ids it lists, and its values as (id, type, value).
         let mut expected: Vec<HashSet<ecs_id_t>> = Vec::with_capacity(plans.len());
         let mut values: Vec<Vec<(ecs_id_t, ecs_entity_t, &Val<'_>)>> =
@@ -1282,14 +1283,14 @@ impl Host {
                 let mut vals = Vec::with_capacity(p.components.len());
                 for b in &p.isa {
                     let be = ids.entity(b).map_err(|m| at(format!("a base: {m}")))?;
-                    // SAFETY: both alive; adding IsA copies the base's Override parts.
-                    unsafe { sys::ecs_add_id(w, e, sys::pair(is_a, be)) };
+                    // SAFETY: both alive; adding IsA copies the base's Copy (once Override) parts.
+                    unsafe { sys::ecs_add_id(bw, e, sys::pair(is_a, be)) };
                 }
                 for t in &p.tags {
                     let te = ids.entity(t).map_err(|m| at(format!("a tag: {m}")))?;
                     exp.insert(te);
                     // SAFETY: both alive.
-                    unsafe { sys::ecs_add_id(w, e, te) };
+                    unsafe { sys::ecs_add_id(bw, e, te) };
                 }
                 for (r, t, data) in &p.pairs {
                     let re = ids
@@ -1301,7 +1302,7 @@ impl Host {
                     let id = sys::pair(re, te);
                     exp.insert(id);
                     // SAFETY: both alive.
-                    unsafe { sys::ecs_add_id(w, e, id) };
+                    unsafe { sys::ecs_add_id(bw, e, id) };
                     if let Some((ty, v)) = data {
                         vals.push((id, *ty, v));
                     }
@@ -1309,18 +1310,18 @@ impl Host {
                 for (ty, v) in &p.components {
                     exp.insert(*ty);
                     // SAFETY: both alive.
-                    unsafe { sys::ecs_add_id(w, e, *ty) };
+                    unsafe { sys::ecs_add_id(bw, e, *ty) };
                     vals.push((*ty, *ty, v));
                 }
                 // SAFETY: both alive.
-                unsafe { sys::ecs_add_id(w, e, self.select) };
+                unsafe { sys::ecs_add_id(bw, e, self.select) };
                 expected.push(exp);
                 values.push(vals);
             }
             Ok(())
         })();
-        // SAFETY: paired with the defer_begin above.
-        unsafe { sys::ecs_defer_end(w) };
+        // SAFETY: paired with the glue_batch_begin above.
+        unsafe { sys::glue_batch_end(w, bw) };
         r?;
         // The values, written in place over the constructed (or base-copied) ones.
         for (p, vals) in plans.iter().zip(&values) {
@@ -1420,9 +1421,9 @@ impl Host {
     pub fn migrate_live(&mut self, m: &Migrations, from: &str, to: &str) -> R<Report> {
         let w = self.w;
         // SAFETY: plain query.
-        if unsafe { sys::ecs_is_deferred(w) } {
+        if unsafe { sys::glue_is_deferred(w) } {
             return Err(
-                "the world is deferred (in a system or defer_begin): migrate outside one".into(),
+                "the world is deferred (a stage, or in a system or observer): migrate outside one".into(),
             );
         }
         let (ft, tt) = (lookup(w, from)?, lookup(w, to)?);

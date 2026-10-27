@@ -300,8 +300,13 @@ unsafe extern "C" {
     pub fn ecs_remove_id(world: *mut ecs_world_t, entity: ecs_entity_t, id: ecs_id_t);
     pub fn ecs_is_enabled_id(world: *const ecs_world_t, entity: ecs_entity_t, id: ecs_id_t)
     -> bool;
-    pub fn ecs_is_deferred(world: *const ecs_world_t) -> bool;
-    pub fn ecs_defer_begin(world: *mut ecs_world_t) -> bool;
+    /// Whether the world cannot be written straight away: a stage, a world in readonly mode (in a system or
+    /// observer), or, on a host's 4.1.6, a deferred world (csrc/glue.c).
+    pub fn glue_is_deferred(world: *const ecs_world_t) -> bool;
+    /// Starts a batch of writes, applied together by `glue_batch_end`; returns the world to write the batch to (Flecs
+    /// past 4.1.6 has no defer mode, so this is stage 0 there).
+    pub fn glue_batch_begin(world: *mut ecs_world_t) -> *mut ecs_world_t;
+    pub fn glue_batch_end(world: *mut ecs_world_t, batch: *mut ecs_world_t);
     pub fn ecs_get_mut_id(
         world: *const ecs_world_t,
         entity: ecs_entity_t,
@@ -326,7 +331,6 @@ unsafe extern "C" {
         max: f64,
         unit: ecs_entity_t,
     );
-    pub fn ecs_defer_end(world: *mut ecs_world_t) -> bool;
     pub fn ecs_get_table(world: *const ecs_world_t, entity: ecs_entity_t) -> *mut ecs_table_t;
     pub fn ecs_lookup_child(
         world: *const ecs_world_t,
@@ -687,7 +691,7 @@ mod tests {
 
     #[test]
     fn a_cursor_reads_back_each_member_kind_a_script_set() {
-        let code = c"struct S {\n b = bool\n i = i32\n u = u64\n f = f32\n s = string\n e = entity\n}\nt {}\nx { S: {b: true, i: -3, u: 7, f: 2.5, s: \"hi\", e: t} }\n";
+        let code = c"struct S(b: bool, i: i32, u: u64, f: f32, s: string, e: entity)\nt {}\nx { S: {b: true, i: -3, u: 7, f: 2.5, s: \"hi\", e: t} }\n";
         // SAFETY: a fresh world, NUL-terminated strings, and a cursor over x's own S, freed before the world.
         unsafe {
             let w = ecs_init();

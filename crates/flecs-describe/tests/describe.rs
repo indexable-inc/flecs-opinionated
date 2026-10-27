@@ -219,8 +219,7 @@ fn register_components() {
 #[test]
 fn script_struct_is_checked() {
     let mut w = World::new().unwrap();
-    w.run("types", "struct Pos {\n  x = f32\n  y = f32\n}\n")
-        .unwrap();
+    w.run("types", "struct Pos(x: f32, y: f32)\n").unwrap();
     let e = lookup(&mut w, "Pos");
     assert_ne!(e, 0);
     // SAFETY: as above; Pos's values are Pos (a #[repr(C)] pair of f32, the script struct's layout).

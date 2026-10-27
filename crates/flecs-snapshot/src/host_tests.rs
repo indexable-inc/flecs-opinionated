@@ -6,19 +6,11 @@ use crate::{MemoryStore, World};
 
 const TYPES: &str = r#"
 using flecs.meta
-struct Uid {
-  hi = u64
-  lo = u64
-}
+struct Uid(hi: u64, lo: u64)
 Persist {}
 Likes {}
-struct Pos {
-  x = f32
-  y = f32
-}
-struct Link {
-  to = entity
-}
+struct Pos(x: f32, y: f32)
+struct Link(to: entity)
 prefab Ship {
   Pos: {1, 2}
 }
@@ -198,8 +190,7 @@ fn restore_migrates_and_refuses_unknown() {
     let old = ha.layout_record("Pos").unwrap();
     // A world where Pos became PosV2 (f64 members and a new z).
     let types2 = TYPES
-        .replace("struct Pos {", "struct PosV2 {\n  z = f64")
-        .replace("x = f32\n  y = f32", "x = f64\n  y = f64")
+        .replace("struct Pos(x: f32, y: f32)", "struct PosV2(z: f64, x: f64, y: f64)")
         .replace("Pos: {1, 2}", "PosV2: {1, 2, 7}");
     let mut b = World::new().unwrap();
     crate::world::script(b.as_ptr(), "types", &types2).unwrap();
@@ -238,11 +229,7 @@ fn restore_migrates_and_refuses_unknown() {
 #[test]
 fn live_migration_in_place() {
     let v2 = r#"
-struct PosV2 {
-  x = f64
-  y = f64
-  z = f64
-}
+struct PosV2(x: f64, y: f64, z: f64)
 "#;
     let mut a = world(&[SCENE, v2]);
     let mut h = host(&mut a);

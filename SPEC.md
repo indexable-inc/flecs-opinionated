@@ -26,10 +26,9 @@ rounded parser. A test compares native and wasm output byte for byte.
 A block's CID is CIDv1 with multihash sha2-256 (0x12). Entity, root and blob chunk-list blocks use codec dag-cbor
 (0x71); blob chunks are raw (0x55).
 
-Integer literals in scripts that do not fit 64 bits saturate (at u64::MAX, or i64's bounds) on every host: the
-pinned Flecs (`vendor/flecs/SOURCE.md`) parses them with `strtoull`/`strtoll` and does not check `ERANGE`, and the
-wasm libc saturates as native libc does, so native and wasm agree. A later Flecs that refuses them makes this an
-error everywhere.
+Integer literals in scripts that do not fit their 64-bit type are refused on every host ("integer literal ... is out
+of range"): the pinned Flecs (`vendor/flecs/SOURCE.md`) checks `ERANGE` from `strtoull`/`strtoll`, and the wasm libc
+sets it as native libc does, so native and wasm agree. (Flecs 4.1.6 did not check, and such literals saturated.)
 
 ## Values
 
@@ -277,7 +276,7 @@ records with its live ones this way instead of comparing hashes.
   sorted by path: `e : A, B`, `A : Z`, `B : Y` gives `[A, B, Y, Z]`.
 - **Inherited parts** are the tags, components and pairs whose type (or relationship) has `(OnInstantiate, Inherit)`
   and that the entity has through `isa` but does not own: exactly what Flecs's `ecs_get` and `ecs_has` find through
-  IsA. A part with the default `(OnInstantiate, Override)` is copied into the instance, so it is owned; one with
+  IsA. A part with the default `(OnInstantiate, Copy)` (called `Override` before Flecs renamed it) is copied into the instance, so it is owned; one with
   `DontInherit` is not reachable at all. When two bases give the same part, the first in `isa` order wins. Flecs
   instead searches depth first in the order of the bases' entity ids, which is not stable across worlds, so the two
   differ only for a part given by two bases at once; give it to one base, or own it on the instance.
@@ -453,13 +452,13 @@ one entity rewrites its block and O(log n) MST nodes. The root CID is the state 
    (below). A layout with no migration to a live type is refused. A value whose layout the world has is checked
    against it straight from the document's bytes (a dry run of the write), with no value tree; every value is
    checked before the world changes.
-2. Refuse when the world is deferred (in a system or `defer_begin`), and when an id is already held by a live entity,
+2. Refuse when the world is deferred (a stage, or in a system or observer), and when an id is already held by a live entity,
    unless the caller remaps ids (`Ids::Remint`, whose function gives each saved id a fresh one; refs to saved entities
    follow the new ids).
 3. Create every entity with `ecs_new` and set its id. Nothing is placed or moved; restore makes new entities.
 4. Set parents (parents before children, refusing a cycle or a depth past `FLECS_DAG_DEPTH_MAX`) and names (refusing a
    name its parent already has).
-5. Add `IsA` bases (copying their `Override` parts), then pairs, tags and components, all in one deferred batch so
+5. Add `IsA` bases (copying their `Copy` parts), then pairs, tags and components, all in one deferred batch so
    each entity moves table once; then write each value in place (from the document's bytes, or the migrated value)
    and mark it modified; then remove any part a base copied that the record does not list.
 6. Add the select tag last, so observers of it see whole entities.
@@ -623,9 +622,7 @@ there. Applying changes to a world is not built.
 and it **overrides the component's rule**:
 
 ```
-struct Title {
-  text = string
-}
+struct Title(text: string)
 Title {
   (Merge, LastWriter)
   text { (Merge, Text) }

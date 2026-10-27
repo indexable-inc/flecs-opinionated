@@ -84,8 +84,8 @@ describe("document", () => {
   test("edge values", () => {
     using w = world(
       [
-        "Ints = vector: {type: i32}",
-        "struct E {\n  a = i64\n  b = u64\n  c = f64\n  d = string\n  e = bool\n  f = i8\n  v = Ints\n  s = string\n}",
+        "vector Ints(i32)",
+        "struct E(a: i64, b: u64, c: f64, d: string, e: bool, f: i8, v: Ints, s: string)",
         "x { E: {a: -9223372036854775808, b: 18446744073709551615, c: -0.5, d: \"héllo\\n\", e: true, f: -128, v: [], s: \"\"} }",
       ].join("\n"),
     );
@@ -121,8 +121,8 @@ describe("blocks", () => {
   });
 
   test("diff finds exactly the changed entities", async () => {
-    const base = "struct P {\n  v = i32\n}\nroot {\n  a { P: {1} }\n  b { P: {2} }\n  c { d {} }\n  big { x {}; y {}; z {} }\n}";
-    const next = "struct P {\n  v = i32\n}\nroot {\n  a { P: {1} }\n  b { P: {3} }\n  c { e {} }\n  big { x {}; y {}; z {} }\n}";
+    const base = "struct P(v: i32)\nroot {\n  a { P: {1} }\n  b { P: {2} }\n  c { d {} }\n  big { x {}; y {}; z {} }\n}";
+    const next = "struct P(v: i32)\nroot {\n  a { P: {1} }\n  b { P: {3} }\n  c { e {} }\n  big { x {}; y {}; z {} }\n}";
     using wa = world(base);
     using wb = world(next);
     const [x, y] = [wa.blocks(["root"]), wb.blocks(["root"])];
@@ -148,13 +148,13 @@ describe("api", () => {
     w.set("site.zeta", "Title", { text: "Zeta again" });
     expect(byPath(w.snapshot(["site"]).entities)["site.zeta"]!.components["Title"]!.value).toEqual({ text: "Zeta again" });
     expect(() => w.set("site.zeta", "Title", { txt: "x" })).toThrow(/unknown member/);
-    w.run("cursor.flecs", "struct Cursor {\n  x = f32\n}\nCursor { (Sync, Ephemeral) }\nsite { Cursor: {3} }");
+    w.run("cursor.flecs", "struct Cursor(x: f32)\nCursor { (Sync, Ephemeral) }\nsite { Cursor: {3} }");
     expect(w.snapshot(["site"]).layouts["Cursor"]).toBeUndefined();
     expect(w.ephemeral(["site"]).entities[0]!.components["Cursor"]!.value).toEqual({ x: 3 });
   });
 
   test("blobs are raw blocks read lazily", async () => {
-    using w = world("struct File {\n  body = sync.Blob\n}\nf { File: {body: []} }");
+    using w = world("struct File(body: sync.Blob)\nf { File: {body: []} }");
     const body = new Uint8Array(300_000).map((_, i) => (i * 2654435761) >>> 24);
     w.set("f", "File", { body });
     const set = w.blocks(["f"]);
@@ -207,7 +207,7 @@ describe("native", () => {
         return [1, new TextEncoder().encode((e as Error).message)];
       }
     };
-    const head = "struct U {\n  v = u64\n}\nstruct I {\n  v = i64\n}\n";
+    const head = "struct U(v: u64)\nstruct I(v: i64)\n";
     for (const body of [
       "x { U: {99999999999999999999} }",
       "x { I: {-99999999999999999999} }",
@@ -345,14 +345,14 @@ describe("layouts", () => {
   });
 
   test("a world's records carry base and version", () => {
-    using w = world("struct HullV2 {\n  v = i32\n}\nx { HullV2: {1} }");
+    using w = world("struct HullV2(v: i32)\nx { HullV2: {1} }");
     const rec = w.snapshot(["x"]).layouts["HullV2"]!;
     expect([rec.base, rec.version]).toEqual(["Hull", 2]);
   });
 
   test("uptr and iptr are allowed", () => {
     expect(() => checkDocument(withLayouts({ P: record("P", 1, "uptr"), Q: record("Q", 1, "iptr") }))).not.toThrow();
-    using w = world("struct P {\n  v = uptr\n}\nx { P: {7} }");
+    using w = world("struct P(v: uptr)\nx { P: {7} }");
     const doc = w.snapshot(["x"]);
     expect((doc.layouts["P"]!.layout as { members: [string, unknown, unknown][] }).members[0]![1]).toBe("uptr");
     expect(doc.entities[0]!.components["P"]!.value).toEqual({ v: 7 });
@@ -426,9 +426,9 @@ describe("described layouts", () => {
 
 describe("logical types", () => {
   const ruled = [
-    "struct Ratio {\n  num = u32\n  den = u32\n}",
+    "struct Ratio(num: u32, den: u32)",
     "Percent {\n  (IsA, flecs.meta.u8)\n  sync.Range: {max: 100}\n}",
-    "struct Gauge {\n  level = u8\n}",
+    "struct Gauge(level: u8)",
     "Ratio {\n  den {\n    sync.Range: {min: 1}\n  }\n}",
     "Gauge {\n  level {\n    (IsA, Percent)\n  }\n}",
     "r {\n  Ratio: {num: 1, den: 2}\n  Gauge: {level: 50}\n}",
@@ -519,8 +519,8 @@ describe("mst", () => {
   test("diff reads a large child set as an MST", async () => {
     const kids = (changed: number) =>
       Array.from({ length: 5000 }, (_, i) => `  c${i} { P: {${i === changed ? -1 : i}} }`).join("\n");
-    using wa = world(`struct P {\n  v = i32\n}\nroot {\n${kids(-1)}\n}`);
-    using wb = world(`struct P {\n  v = i32\n}\nroot {\n${kids(1234)}\n}`);
+    using wa = world(`struct P(v: i32)\nroot {\n${kids(-1)}\n}`);
+    using wb = world(`struct P(v: i32)\nroot {\n${kids(1234)}\n}`);
     const [x, y] = [wa.blocks(["root"]), wb.blocks(["root"])];
     const store = new MemoryBlockStore();
     store.putAll(x);

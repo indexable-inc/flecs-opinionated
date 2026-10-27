@@ -11,12 +11,17 @@ use sys::{ecs_entity_t, ecs_world_t};
 use crate::merge::Rule;
 use crate::mode::Mode;
 
+/// Types are written as their reflection components (`flecs.meta.struct`, member children with `flecs.meta.member`,
+/// `flecs.meta.vector`), not with `struct Name(...)`: this script also runs on a host's Flecs (the space game's 4.1.6,
+/// SPEC.md "Host worlds"), which has neither that shorthand nor, like the pinned Flecs, the older `name = type` member
+/// form.
 pub const SCRIPT: &str = r#"
 sync {
   // The stable id (SPEC.md, "Stable ids"). Not copied to prefab instances: an instance gets its own.
-  struct Id {
-    hi = flecs.meta.u64
-    lo = flecs.meta.u64
+  Id {
+    flecs.meta.struct: {}
+    hi { flecs.meta.member: {type: flecs.meta.u64} }
+    lo { flecs.meta.member: {type: flecs.meta.u64} }
   }
   Id { (OnInstantiate, DontInherit) }
 
@@ -36,19 +41,21 @@ sync {
 
   // Binary data (SPEC.md, "Values"). Bytes is written inline as a CBOR byte string; Blob is cut into raw blocks by
   // content-defined chunking and written as a CID link.
-  Bytes = flecs.meta.vector: {type: flecs.meta.u8}
-  Blob = flecs.meta.vector: {type: flecs.meta.u8}
+  Bytes { flecs.meta.vector: {type: flecs.meta.u8} }
+  Blob { flecs.meta.vector: {type: flecs.meta.u8} }
 
   // On a type entity in a host process: a pointer to the type's description (SPEC.md, "Described types"). Never in a
   // snapshot; a script world never has it.
-  struct Described {
-    ptr = flecs.meta.uptr
+  Described {
+    flecs.meta.struct: {}
+    ptr { flecs.meta.member: {type: flecs.meta.uptr} }
   }
 
   // Reserved, not enforced (SPEC.md, "Permissions").
   // An actor: an entity with its public key. `key` is its raw ed25519 public key in lowercase hex (64 digits): the actor id.
-  struct Actor {
-    key = flecs.meta.string
+  Actor {
+    flecs.meta.struct: {}
+    key { flecs.meta.member: {type: flecs.meta.string} }
   }
   // Access to a subtree, on a role prefab or an actor (Keyhive's levels: Relay < Read < Edit < Admin). Each level
   // implies the ones below it; a grant covers the entity and everything under it.
@@ -65,9 +72,10 @@ sync {
   // (ValidatedBy, validator) on a component type or a subtree root: every change must pass the validator.
   ValidatedBy {}
   // A validator: a pure predicate named by `name`, at `version` (SPEC.md, "Validation").
-  struct Validator {
-    name = flecs.meta.string
-    version = flecs.meta.u32
+  Validator {
+    flecs.meta.struct: {}
+    name { flecs.meta.member: {type: flecs.meta.string} }
+    version { flecs.meta.member: {type: flecs.meta.u32} }
   }
   // (Authority, actor) on a subtree root: changes there need that actor's countersignature.
   Authority { Exclusive }
@@ -76,9 +84,10 @@ sync {
   // on a struct member (which may also be `(IsA, <logical type>)`). A member's own rules and its logical type's
   // combine: ranges intersect.
   // Range: {min, max}, inclusive; a bound left out is unbounded (the constructor sets -f64::MAX and f64::MAX).
-  struct Range {
-    min = flecs.meta.f64
-    max = flecs.meta.f64
+  Range {
+    flecs.meta.struct: {}
+    min { flecs.meta.member: {type: flecs.meta.f64} }
+    max { flecs.meta.member: {type: flecs.meta.f64} }
   }
   Range { (OnInstantiate, Inherit) }
   // Finite: no NaN or infinity (a float).
@@ -98,8 +107,9 @@ sync {
   // (Validated, check): a check that must accept the value before a restore or write takes it.
   Validated { (OnInstantiate, Inherit) }
   // On a check entity in a host process: a pointer to its function (register_check). Never in a snapshot.
-  struct Check {
-    ptr = flecs.meta.uptr
+  Check {
+    flecs.meta.struct: {}
+    ptr { flecs.meta.member: {type: flecs.meta.uptr} }
   }
   // The checks this library and its hosts register, and the logical types described types declare.
   checks {}
