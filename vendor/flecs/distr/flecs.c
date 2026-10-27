@@ -18264,7 +18264,8 @@ void ecs_os_fini(void) {
    This mainly fixes musl support, as musl doesn't define any preprocessor macro specifying its presence. */ 
 #if (defined(ECS_TARGET_LINUX) && !defined(__GLIBC__)) || defined(__COSMOCC__)
 #define HAVE_EXECINFO 0
-#elif !defined(ECS_TARGET_WINDOWS) && !defined(ECS_TARGET_EM) && !defined(ECS_TARGET_ANDROID) && !defined(ECS_TARGET_WASM)
+#elif !defined(ECS_TARGET_WINDOWS) && !defined(ECS_TARGET_EM) && \
+    !defined(ECS_TARGET_ANDROID) && !defined(ECS_TARGET_WASM)
 #define HAVE_EXECINFO 1
 #else
 #define HAVE_EXECINFO 0
@@ -33628,35 +33629,38 @@ static void flecs_strbuf_grow(
         b->content = b->small_string;
         b->size = ECS_STRBUF_SMALL_STRING_SIZE;
     } else {
-        /* local: the size is an int32_t. Doubled past 1 GiB it wrapped
-         * negative (signed overflow, so the "< 16" clamp could be folded
-         * away), the allocator refused the negative size, and the NULL it
-         * returned was stored: `size - length` wrapped positive, the append
-         * went on and flecs_strbuf_ptr asserted content != NULL, far from the
-         * cause. Grow to at most INT32_MAX and abort, naming the cause, when
-         * the buffer cannot grow or the allocation fails. */
+        /* Double the size, but don't let the int32_t wrap past 1GB, and don't
+         * store a NULL buffer when the allocation fails: both would surface
+         * later as an unrelated assert in flecs_strbuf_ptr. */
         int64_t size = (int64_t)b->size * 2;
-        if (size < 16) size = 16;
-        if (size > INT32_MAX) size = INT32_MAX;
+        if (size < 16) {
+            size = 16;
+        }
+        if (size > INT32_MAX) {
+            size = INT32_MAX;
+        }
         if (size <= b->size) {
             ecs_abort(ECS_OUT_OF_MEMORY,
                 "string buffer cannot grow past %d bytes", b->size);
         }
+
         char *content;
         if (b->content == b->small_string) {
-            content = ecs_os_malloc_n(char, (int32_t)size);
+            content = ecs_os_malloc_n(char, (ecs_size_t)size);
             if (content) {
                 ecs_os_memcpy(content, b->small_string, b->length);
             }
         } else {
-            content = ecs_os_realloc_n(b->content, char, (int32_t)size);
+            content = ecs_os_realloc_n(b->content, char, (ecs_size_t)size);
         }
+
         if (!content) {
             ecs_abort(ECS_OUT_OF_MEMORY,
-                "string buffer: allocating %d bytes failed", (int32_t)size);
+                "string buffer: failed to allocate %d bytes", (ecs_size_t)size);
         }
+
         b->content = content;
-        b->size = (int32_t)size;
+        b->size = (ecs_size_t)size;
     }
 }
 

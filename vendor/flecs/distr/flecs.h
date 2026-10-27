@@ -508,6 +508,15 @@
 #endif
 #endif
 
+/* With prefabs, the observers that meta creates (the units monitor and the
+ * struct base observer) match inherited components and transitive IsA pairs,
+ * which needs query plans. */
+#if defined(FLECS_META) && defined(FLECS_PREFAB)
+#ifndef FLECS_QUERY_PLANS
+#define FLECS_QUERY_PLANS
+#endif
+#endif
+
 #if defined(FLECS_ALERTS) || defined(FLECS_APP) || defined(FLECS_HTTP) || \
     defined(FLECS_JSON) || defined(FLECS_METRICS) || defined(FLECS_PIPELINE) || \
     defined(FLECS_REST) || defined(FLECS_STATS) || defined(FLECS_SYSTEM) || \
@@ -945,8 +954,8 @@ extern "C" {
 #define ECS_TARGET_EM
 #define ECS_TARGET_POSIX
 #elif defined(__wasm__)
-/* local: a plain wasm32 build (wasm32-unknown-unknown, no libc of its own):
-   POSIX string functions, no backtraces, no OS API impl. */
+/* WebAssembly without Emscripten (e.g. wasm32-unknown-unknown or WASI). The
+ * C library, if any, provides POSIX string functions but no backtraces. */
 #define ECS_TARGET_WASM
 #define ECS_TARGET_POSIX
 #endif

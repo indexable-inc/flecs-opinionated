@@ -1,8 +1,9 @@
 //! Compiles Flecs's amalgamated source (vendor/flecs/distr/flecs.c, upstream master: vendor/flecs/SOURCE.md) and csrc/glue.c with cc, for the host
 //! and for wasm32-unknown-unknown. Adapted from den's vendor/hyperion-flecs-c/build.rs.
 //!
-//! Addons: FLECS_CUSTOM_BUILD plus LOG (error messages), SCRIPT (which pulls in META, DOC and PARSER) and PREFAB. No
-//! JSON, REST, HTTP, systems or pipeline: nothing here needs threads or a clock.
+//! Addons: FLECS_CUSTOM_BUILD plus LOG (error messages), SCRIPT (which pulls in META, DOC and PARSER) and PREFAB.
+//! META with PREFAB pulls in QUERY_PLANS (Flecs's addon_defines.h): meta's observers match inherited parts, which
+//! need a query plan. No JSON, REST, HTTP, systems or pipeline: nothing here needs threads or a clock.
 //!
 //! Assert policy (as den's): NDEBUG plus FLECS_KEEP_ASSERT keeps every ecs_check and ecs_assert but drops the debug-only
 //! bookkeeping, and FLECS_SOFT_ASSERT makes ecs_check (argument and constraint checks) log and fail the call instead of
@@ -12,7 +13,8 @@
 //! where wasm (which has no FMA) rounds twice, so the same script would give different bits on aarch64 and in wasm.
 //!
 //! wasm32-unknown-unknown has no C library: `wasm-libc/` is a declaration-only set of headers plus `libc.c` (strings,
-//! ctype, printf, stub files). `ECS_TARGET_POSIX` makes flecs use the plain C calls. malloc, calloc, realloc, free,
+//! ctype, printf, stub files). Flecs sets `ECS_TARGET_WASM` and `ECS_TARGET_POSIX` for
+//! `__wasm__`, so it uses the plain C calls and no backtraces. malloc, calloc, realloc, free,
 //! abort and strtod come from Rust (src/lib.rs). Use an unwrapped clang for wasm (`CC_wasm32_unknown_unknown`,
 //! `AR_wasm32_unknown_unknown`): a nix cc-wrapper adds host flags.
 use std::env;
@@ -25,7 +27,10 @@ fn main() {
     // repo's pin (vendor/flecs/distr), or, vendored into a host's tree, the host's amalgamation.
     let host = env::var_os("CARGO_FEATURE_HOST").is_some();
     let candidates: &[&str] = if host {
-        &["../../../flecs_ecs_sys/src", "../../vendor/flecs_ecs_sys/src"]
+        &[
+            "../../../flecs_ecs_sys/src",
+            "../../vendor/flecs_ecs_sys/src",
+        ]
     } else {
         &["../../vendor/flecs/distr", "../../../flecs_ecs_sys/src"]
     };
@@ -89,8 +94,7 @@ fn main() {
         ));
     if target.starts_with("wasm32") {
         let libc = root.join("wasm-libc");
-        b.define("ECS_TARGET_POSIX", None)
-            .flag("-ffreestanding")
+        b.flag("-ffreestanding")
             .flag("-nostdlibinc")
             .include(libc.join("include"))
             .file(libc.join("libc.c"));

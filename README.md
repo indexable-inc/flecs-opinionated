@@ -27,9 +27,7 @@ const flecs = await Flecs.load(); // the bundled flecs.wasm; or bytes, a URL, a 
 using world = flecs.world();      // worlds are independent; many can coexist
 
 world.run("site.flecs", `
-  struct Title {
-    text = string
-  }
+  struct Title(text: string)
   Title { text { (Merge, Text) } }
   site {
     OrderedChildren
@@ -150,8 +148,9 @@ Requirements:
 - an unwrapped clang and llvm-ar (clang 18 or later) for wasm, set as `CC_wasm32_unknown_unknown` and
   `AR_wasm32_unknown_unknown`. A nix cc-wrapper adds host flags and breaks the build.
 
-Flecs is vendored in `vendor/flecs`: the amalgamation the space game links, Flecs C `6e4cd338a` (4.1.6) plus the
-game's fork changes, so a host world and this library run the same Flecs (`vendor/flecs/SOURCE.md`). It is built
+Flecs is vendored in `vendor/flecs`: upstream Flecs C master (`72a531d6f`) plus three fixes open as upstream PRs,
+with no local patches (`vendor/flecs/SOURCE.md`). Host mode instead compiles against the host's Flecs, which for the
+space game is still 4.1.6 plus its fork; `host-check` checks that pairing. It is built
 with the LOG, SCRIPT (with META, DOC and PARSER) and PREFAB addons. The release wasm is about 1.35 MB (480 KB gzipped), built with
 `opt-level = "s"` and then `wasm-opt -Os` (binaryen version_133; set `WASM_OPT` or put it on PATH).
 

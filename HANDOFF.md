@@ -126,7 +126,8 @@ The renderer's shims (`site/renderer/core/src/scripts.rs`) can go:
 
 What the space game needs to replace `crates/space-snapshot` (its model: the-game `docs/agents/rust-live.md`).
 
-- **Pin.** Flecs 4.1.6 (`6e4cd338a`) plus the game's fork (`vendor/flecs`); flecs_ecs and flecs_ecs_sys at rev
+- **Pin.** The game: Flecs 4.1.6 (`6e4cd338a`) plus its fork (a copy in `vendor/flecs_ecs_sys/src`; this library's own
+  `vendor/flecs` has moved to upstream master, `vendor/flecs/SOURCE.md`); flecs_ecs and flecs_ecs_sys at rev
   `bf956db99b69d41ee142c9d52054911af28d7e93`. `host-check` patches flecs_ecs_sys to `vendor/flecs_ecs_sys` (that
   pin built from our amalgamation): the git flecs_ecs_sys lacks the fork's symbols (`EcsParentDepth`), so the root
   workspace's `--all-features` does not link; CI and build.py list features instead.
