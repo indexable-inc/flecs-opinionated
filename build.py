@@ -95,6 +95,9 @@ async def build(test: bool) -> None:
         # Not --all-features: flecs-c's `host` links the application's Flecs, which host-check/ supplies.
         features = "flecs-snapshot/ffi,flecs-describe/glam,flecs-describe/glamx,flecs-describe/half,flecs-describe/bitflags"
         g.create_task(run("cargo test", ["cargo", "test", "--workspace", "--features", features], 900))
+        # The native-only REST server, on its own: in the workspace run it would change the native worlds the
+        # byte-identity tests compare with wasm (REST imports the pipeline, timer and REST modules into every world).
+        g.create_task(run("cargo test rest", ["cargo", "test", "-p", "flecs-c", "--features", "rest"], 900))
         # Host mode against flecs_ecs at the space game's pin (its own workspace, patched to vendor/flecs_ecs_sys).
         g.create_task(run("host-check", ["cargo", "test", "--manifest-path", "host-check/Cargo.toml"], 900))
         g.create_task(run("bun test", ["bun", "test"], 300))

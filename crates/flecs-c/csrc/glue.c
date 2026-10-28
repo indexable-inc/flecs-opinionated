@@ -26,8 +26,14 @@ void glue_os_api(glue_log_t log, void (*abort_fn)(void)) {
     ecs_os_api_t api = ecs_os_get_api();
     api.log_ = log;
     api.abort_ = abort_fn;
+#ifndef GLUE_REST
+    /* With REST the HTTP layer's request cache reads the clock to expire entries; nothing else does. */
     api.get_time_ = glue_zero_time;
     api.now_ = glue_zero_now;
+#else
+    (void)glue_zero_time;
+    (void)glue_zero_now;
+#endif
     api.sleep_ = glue_sleep;
     api.flags_ &= ~(ecs_flags32_t)EcsOsApiLogWithColors;
     ecs_os_set_api(&api);
@@ -489,3 +495,34 @@ void glue_member_refine(ecs_world_t *world, ecs_entity_t member, bool has_range,
         }
     }
 }
+
+#ifdef GLUE_REST
+/* A read-only REST server over `world` (Flecs's REST addon, EcsRest's readonly): writes (PUT, DELETE, POST) and
+ * function calls reply 403. It is never started, so it opens no socket and starts no thread: the caller owns the
+ * listener and hands each request to glue_rest_request on the world's thread. No reply cache. NULL on failure. */
+ecs_http_server_t *glue_rest_new(ecs_world_t *world) {
+    ecs_http_server_t *srv = ecs_rest_server_init(world, &(ecs_http_server_desc_t){ .cache_timeout = 0 });
+    if (!srv) return NULL;
+    ecs_rest_ctx_t *ctx = ecs_http_server_ctx(srv);
+    ctx->readonly = true;
+    return srv;
+}
+
+void glue_rest_free(ecs_http_server_t *srv) { ecs_rest_server_fini(srv); }
+
+/* Serves one request: `method` ("GET", ...), `path` the raw request target (percent-encoded path and query), `body`
+ * NULL or a NUL-terminated body. Returns the HTTP status code and writes the reply body (ecs_os_malloc'd, NULL when
+ * empty; free it with glue_free) and its length, and the content type (a static string). */
+int32_t glue_rest_request(ecs_http_server_t *srv, const char *method, const char *path, const char *body,
+                          char **body_out, int32_t *len_out, const char **content_type_out) {
+    ecs_http_reply_t reply = ECS_HTTP_REPLY_INIT;
+    ecs_http_server_request(srv, method, path, body, &reply);
+    *len_out = ecs_strbuf_written(&reply.body);
+    *body_out = ecs_strbuf_get(&reply.body);
+    *content_type_out = reply.content_type;
+    ecs_strbuf_reset(&reply.headers);
+    return reply.code;
+}
+
+void glue_free(void *ptr) { ecs_os_free(ptr); }
+#endif

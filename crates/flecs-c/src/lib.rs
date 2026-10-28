@@ -683,6 +683,77 @@ mod wasm_libc {
     }
 }
 
+/// Opaque: Flecs's HTTP server, here only ever a never-started REST server from `glue_rest_new`.
+#[cfg(feature = "rest")]
+#[repr(C)]
+pub struct ecs_http_server_t {
+    _private: [u8; 0],
+}
+
+// The `rest` feature (native only): a read-only REST server over a world, fed one request at a time on the world's
+// thread (csrc/glue.c).
+#[cfg(feature = "rest")]
+unsafe extern "C" {
+    pub fn glue_rest_new(world: *mut ecs_world_t) -> *mut ecs_http_server_t;
+    pub fn glue_rest_free(srv: *mut ecs_http_server_t);
+    pub fn glue_rest_request(
+        srv: *mut ecs_http_server_t,
+        method: *const c_char,
+        path: *const c_char,
+        body: *const c_char,
+        body_out: *mut *mut c_char,
+        len_out: *mut i32,
+        content_type_out: *mut *const c_char,
+    ) -> i32;
+    pub fn glue_free(ptr: *mut c_void);
+}
+
+#[cfg(all(test, feature = "rest"))]
+mod rest_tests {
+    use super::*;
+
+    /// One request through the never-started server: (code, body).
+    unsafe fn request(
+        srv: *mut ecs_http_server_t,
+        method: &core::ffi::CStr,
+        path: &core::ffi::CStr,
+    ) -> (i32, bool) {
+        let (mut body, mut len, mut ct) = (core::ptr::null_mut(), 0i32, core::ptr::null());
+        // SAFETY: a live server and NUL-terminated strings; the body is freed below.
+        unsafe {
+            let code = glue_rest_request(
+                srv,
+                method.as_ptr(),
+                path.as_ptr(),
+                core::ptr::null(),
+                &mut body,
+                &mut len,
+                &mut ct,
+            );
+            let nonempty = !body.is_null() && len > 0;
+            glue_free(body.cast());
+            (code, nonempty)
+        }
+    }
+
+    #[test]
+    fn rest_serves_reads_and_refuses_writes() {
+        // SAFETY: a world and a server made and freed here, on this thread.
+        unsafe {
+            let w = ecs_init();
+            let srv = glue_rest_new(w);
+            assert!(!srv.is_null());
+            assert_eq!(request(srv, c"GET", c"/entity/flecs/core"), (200, true));
+            assert_eq!(request(srv, c"PUT", c"/entity/made_by_rest").0, 403);
+            assert_eq!(ecs_lookup(w, c"made_by_rest".as_ptr()), 0);
+            assert_eq!(request(srv, c"DELETE", c"/entity/flecs/core").0, 403);
+            assert_ne!(ecs_lookup(w, c"flecs.core".as_ptr()), 0);
+            glue_rest_free(srv);
+            ecs_fini(w);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;

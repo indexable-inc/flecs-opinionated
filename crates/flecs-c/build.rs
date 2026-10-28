@@ -7,6 +7,11 @@
 //! META with PREFAB pulls in QUERY_PLANS (Flecs's addon_defines.h): meta's observers match inherited parts, which
 //! need a query plan. No JSON, REST, HTTP, systems or pipeline: nothing here needs threads or a clock.
 //!
+//! The `rest` feature (native only; refused for wasm32 and host mode) adds REST, which pulls in HTTP, JSON and
+//! PIPELINE (so SYSTEM and TIMER), and GLUE_REST for csrc/glue.c: Flecs's REST API over a world, served one request
+//! at a time through `glue_rest_request` (no sockets or threads; the caller owns the listener), and the real clock,
+//! which the HTTP layer's request cache needs to expire entries. Without it the build is byte for byte what it was.
+//!
 //! Assert policy (as den's): NDEBUG plus FLECS_KEEP_ASSERT keeps every ecs_check and ecs_assert but drops the debug-only
 //! bookkeeping, and FLECS_SOFT_ASSERT makes ecs_check (argument and constraint checks) log and fail the call instead of
 //! aborting. Internal sanity checks still abort: on wasm that is a trap, natively a process abort.
@@ -47,6 +52,12 @@ fn main() {
             )
         });
     let target = env::var("TARGET").expect("TARGET");
+    let rest = env::var_os("CARGO_FEATURE_REST").is_some();
+    if rest && (host || target.starts_with("wasm32")) {
+        panic!(
+            "the rest feature is native only and not for host mode (target {target}, host {host})"
+        );
+    }
     let mut b = cc::Build::new();
     if host {
         // Host mode: only the glue, against the host's Flecs (flecs_ecs_sys, which this crate depends on, so the
@@ -95,6 +106,9 @@ fn main() {
             "-ffile-prefix-map={}=.",
             root.join("../..").display()
         ));
+    if rest {
+        b.define("FLECS_REST", None).define("GLUE_REST", None);
+    }
     if target.starts_with("wasm32") {
         let libc = root.join("wasm-libc");
         b.flag("-ffreestanding")
