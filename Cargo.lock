@@ -270,6 +270,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "flecs_ecs_sys",
+ "sha2",
 ]
 
 [[package]]

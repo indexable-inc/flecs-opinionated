@@ -21,3 +21,4 @@ flecs_ecs_sys = { git = "https://github.com/Indra-db/Flecs-Rust", rev = "bf956db
 
 [build-dependencies]
 cc = "1"
+sha2 = "0.10"
