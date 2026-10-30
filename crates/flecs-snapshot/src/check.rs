@@ -58,6 +58,29 @@ pub fn exact<'a>(v: &'a Ipld, keys: &[&str], what: &str) -> R<&'a BTreeMap<Strin
     Ok(m)
 }
 
+/// As `exact`, with `optional` keys that may also be there.
+pub fn exact_opt<'a>(
+    v: &'a Ipld,
+    keys: &[&str],
+    optional: &[&str],
+    what: &str,
+) -> R<&'a BTreeMap<String, Ipld>> {
+    let Ipld::Map(m) = v else {
+        return Err(format!("{what} is not a map"));
+    };
+    for k in m.keys() {
+        if !keys.contains(&k.as_str()) && !optional.contains(&k.as_str()) {
+            return Err(format!("{what} has the unknown key {k:?}"));
+        }
+    }
+    for k in keys {
+        if !m.contains_key(*k) {
+            return Err(format!("{what} has no {k:?}"));
+        }
+    }
+    Ok(m)
+}
+
 fn list<'a>(v: &'a Ipld, what: &str) -> R<&'a [Ipld]> {
     match v {
         Ipld::List(l) => Ok(l),
@@ -768,11 +791,24 @@ fn parts(m: &BTreeMap<String, Ipld>, layouts: &BTreeMap<String, Ipld>) -> R<()> 
     Ok(())
 }
 
-/// A host record (SPEC.md, "Host record"); returns its id.
+/// The 16 bytes of an `{"id"}` ref, or None for a `{"path"}` one.
+fn id_of(r: &Ipld) -> Option<[u8; 16]> {
+    match r {
+        Ipld::Map(m) => match m.get("id") {
+            Some(Ipld::Bytes(b)) => b.as_slice().try_into().ok(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A host record (SPEC.md, "Host record"); returns its id. `children` and `parent_component` are optional; how they
+/// match the other records is `host_document`'s check.
 pub fn host_entity(v: &Ipld, layouts: &BTreeMap<String, Ipld>) -> R<[u8; 16]> {
-    let m = exact(
+    let m = exact_opt(
         v,
         &["id", "name", "parent", "tags", "pairs", "components", "isa"],
+        &["children", "parent_component"],
         "host record",
     )?;
     let id: [u8; 16] = match &m["id"] {
@@ -784,8 +820,85 @@ pub fn host_entity(v: &Ipld, layouts: &BTreeMap<String, Ipld>) -> R<[u8; 16]> {
     };
     nullable(&m["name"], |v| text(v, "name"))?;
     nullable(&m["parent"], |v| reference(v, "parent"))?;
+    if let Some(pc) = m.get("parent_component") {
+        if *pc != Ipld::Bool(true) {
+            return Err("parent_component is not true (it is left out otherwise)".into());
+        }
+        if m["parent"] == Ipld::Null {
+            return Err("parent_component is set but there is no parent".into());
+        }
+    }
+    if let Some(c) = m.get("children") {
+        let kids = list(c, "children")?;
+        if kids.is_empty() {
+            return Err("children is empty (it is left out when there are none)".into());
+        }
+        for k in kids {
+            reference(k, "child")?;
+            if id_of(k).is_none() {
+                return Err("a child is not an {\"id\"} ref".into());
+            }
+        }
+    }
     parts(m, layouts)?;
     Ok(id)
+}
+
+/// The child order across a host document's records (SPEC.md, "Host record"): each `children` lists exactly the
+/// records whose parent it is, each once, and a record with a child in `Parent` storage lists them.
+fn host_children(es: &[Ipld]) -> R<()> {
+    fn rec(e: &Ipld) -> &BTreeMap<String, Ipld> {
+        match e {
+            Ipld::Map(m) => m,
+            _ => unreachable!("checked by host_entity"),
+        }
+    }
+    let ids: Vec<[u8; 16]> = es
+        .iter()
+        .map(|e| match &rec(e)["id"] {
+            Ipld::Bytes(b) => b.as_slice().try_into().ok(),
+            _ => None,
+        })
+        .collect::<Option<_>>()
+        .ok_or("a host record id is not 16 bytes")?;
+    let index: BTreeMap<[u8; 16], usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+    let mut kids_of: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (i, e) in es.iter().enumerate() {
+        if let Some(p) = id_of(&rec(e)["parent"]).and_then(|id| index.get(&id)) {
+            kids_of.entry(*p).or_default().push(i);
+        }
+    }
+    for (i, e) in es.iter().enumerate() {
+        let mine = kids_of.get(&i).map_or(&[][..], Vec::as_slice);
+        match rec(e).get("children") {
+            Some(c) => {
+                let mut got = Vec::new();
+                for k in list(c, "children")? {
+                    let j = id_of(k).and_then(|id| index.get(&id)).ok_or_else(|| {
+                        format!("entity {i}: its children list an entity that is not in the document")
+                    })?;
+                    got.push(*j);
+                }
+                let listed = got.len();
+                got.sort_unstable();
+                got.dedup();
+                let mut want = mine.to_vec();
+                want.sort_unstable();
+                if got.len() != listed || got != want {
+                    return Err(format!(
+                        "entity {i}: its children are not exactly the entities whose parent it is, each once"
+                    ));
+                }
+            }
+            None if mine.iter().any(|&j| rec(&es[j]).contains_key("parent_component")) => {
+                return Err(format!(
+                    "entity {i}: a child of it is in Parent storage, but its record lists no child order"
+                ));
+            }
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 /// A host document (SPEC.md, "Host document"): the version, the id component's path, every layout and every host
@@ -800,7 +913,8 @@ pub fn host_document(doc: &Ipld) -> R<()> {
     text(&m["ids"], "ids")?;
     let ls = layouts(m.get("layouts"))?;
     let mut last: Option<[u8; 16]> = None;
-    for (i, e) in list(&m["entities"], "entities")?.iter().enumerate() {
+    let es = list(&m["entities"], "entities")?;
+    for (i, e) in es.iter().enumerate() {
         let id = host_entity(e, ls).map_err(|err| format!("entity {i}: {err}"))?;
         if last.is_some_and(|l| l >= id) {
             return Err(format!(
@@ -809,7 +923,7 @@ pub fn host_document(doc: &Ipld) -> R<()> {
         }
         last = Some(id);
     }
-    Ok(())
+    host_children(es)
 }
 
 pub fn version(m: &BTreeMap<String, Ipld>, what: &str) -> R<()> {

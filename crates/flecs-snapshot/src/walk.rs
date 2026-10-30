@@ -121,6 +121,24 @@ pub struct Snapshot {
 
 pub type R<T> = Result<T, String>;
 
+/// The children Flecs keeps in order under `p` (OrderedChildren, or any child in `Parent` storage), both storages, in
+/// that order; None when Flecs keeps no order for `p`.
+pub(crate) fn ordered_children(w: *const ecs_world_t, p: ecs_entity_t) -> Option<Vec<ecs_entity_t>> {
+    let mut buf = vec![0; 16];
+    loop {
+        // SAFETY: `buf` has room for its length.
+        let n = unsafe { sys::glue_ordered_children(w, p, buf.as_mut_ptr(), buf.len() as i32) };
+        if n < 0 {
+            return None;
+        }
+        if n as usize <= buf.len() {
+            buf.truncate(n as usize);
+            return Some(buf);
+        }
+        buf = vec![0; n as usize];
+    }
+}
+
 fn cstr(p: *const c_char) -> Option<String> {
     if p.is_null() {
         return None;
@@ -186,6 +204,10 @@ struct HostParts {
     id: [u8; 16],
     name: Option<String>,
     parent: Ipld,
+    /// The parent is held in Flecs's `Parent` component, not a `(ChildOf, p)` pair (SPEC.md, "Host record").
+    parent_component: bool,
+    /// The saved children in Flecs's order, when Flecs keeps one for this entity and it has a saved child.
+    children: Option<Vec<Ipld>>,
     tags: Vec<Ipld>,
     pairs: Vec<(Ipld, Ipld, Option<ValuePart>)>,
     components: Vec<ValuePart>,
@@ -221,8 +243,8 @@ pub struct Walk<'s> {
     in_ephemeral: bool,
     /// Stable id to the path of the entity that has it, to refuse two entities with one id.
     stable: HashMap<[u8; 16], String>,
-    /// User types marked DontFragment: their values live outside the entity's type, where the walk does not read
-    /// them, so an entity that has one is refused rather than written without it.
+    /// User types marked DontFragment: their values live outside the entity's type. A script world's walk does not
+    /// read them, so an entity that has one is refused there; a host walk reads them (`dont_fragment_ids`).
     dont_fragment: Vec<ecs_entity_t>,
     /// Per-type caches, valid for one walk (a walk never sees a type change): members, paths for messages, layouts.
     members_cache: HashMap<ecs_entity_t, std::rc::Rc<[Member]>>,
@@ -546,6 +568,37 @@ impl<'s> Walk<'s> {
         self.dont_fragment = all.into_iter().filter(|t| !self.is_builtin(*t)).collect();
     }
 
+    /// The DontFragment ids `e` owns (outside its table, in Flecs's sparse storage): each user type marked
+    /// DontFragment (`find_dont_fragment`) as a tag or component, and each `(type, target)` pair. Empty when the walk
+    /// found no such type.
+    pub fn dont_fragment_ids(&self, e: ecs_entity_t) -> Vec<ecs_id_t> {
+        let mut out = Vec::new();
+        for &t in &self.dont_fragment {
+            // SAFETY: plain queries on a live entity.
+            unsafe {
+                // UNSURE(integrator): ecs_owns_id and ecs_get_target read DontFragment (sparse) storage on master
+                // c73ce7115 (ecs_get_target has a DontFragment branch; ecs_owns_id goes through ecs_has_id's
+                // component record path). host-check's dont_fragment test covers both.
+                if sys::ecs_owns_id(self.w, e, t) {
+                    out.push(t);
+                }
+                // A non-exclusive DontFragment relationship can have several targets; past the owned ones
+                // ecs_get_target looks in IsA bases, whose targets `e` does not own.
+                for i in 0..i32::MAX {
+                    let tgt = sys::ecs_get_target(self.w, e, t, i);
+                    if tgt == 0 {
+                        break;
+                    }
+                    let id = sys::pair(t, tgt);
+                    if sys::ecs_owns_id(self.w, e, id) && !out.contains(&id) {
+                        out.push(id);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// A host record (SPEC.md, "Host record") of a saved entity: its own parts only, its direct bases, its parent and
     /// name. `used` holds the types whose layouts it used.
     pub fn host_record(&mut self, e: ecs_entity_t) -> R<BTreeMap<String, Ipld>> {
@@ -577,6 +630,12 @@ impl<'s> Walk<'s> {
         rec.insert("pairs".into(), Ipld::List(pairs));
         rec.insert("components".into(), Ipld::Map(components));
         rec.insert("isa".into(), Ipld::List(p.isa));
+        if let Some(kids) = p.children {
+            rec.insert("children".into(), Ipld::List(kids));
+        }
+        if p.parent_component {
+            rec.insert("parent_component".into(), Ipld::Bool(true));
+        }
         Ok(rec)
     }
 
@@ -585,8 +644,11 @@ impl<'s> Walk<'s> {
     pub fn host_record_cbor(&mut self, e: ecs_entity_t) -> R<([u8; 16], Vec<u8>)> {
         let p = self.host_parts(e)?;
         let mut out = Vec::with_capacity(256);
-        cbor::map(&mut out, 7);
-        // DAG-CBOR key order: id, isa, name, tags, pairs, parent, components.
+        cbor::map(
+            &mut out,
+            7 + usize::from(p.children.is_some()) + usize::from(p.parent_component),
+        );
+        // DAG-CBOR key order: id, isa, name, tags, pairs, parent, children, components, parent_component.
         cbor::text(&mut out, "id");
         cbor::bytes(&mut out, &p.id);
         cbor::text(&mut out, "isa");
@@ -624,6 +686,10 @@ impl<'s> Walk<'s> {
         }
         cbor::text(&mut out, "parent");
         cbor::ipld(&mut out, &p.parent);
+        if let Some(kids) = p.children {
+            cbor::text(&mut out, "children");
+            cbor::ipld(&mut out, &Ipld::List(kids));
+        }
         cbor::text(&mut out, "components");
         let mut comps = p.components;
         comps.sort_by(|a, b| cbor::key_order(&a.0, &b.0));
@@ -637,6 +703,10 @@ impl<'s> Walk<'s> {
             self.write_value(ty, ptr, &mut out)
                 .map_err(|m| format!("component {path}: {m}"))?;
         }
+        if p.parent_component {
+            cbor::text(&mut out, "parent_component");
+            cbor::bool(&mut out, true);
+        }
         Ok((p.id, out))
     }
 
@@ -648,15 +718,9 @@ impl<'s> Walk<'s> {
             .s
             .stable_id(self.w, e)
             .ok_or("it has no id component")?;
-        for i in 0..self.dont_fragment.len() {
-            let t = self.dont_fragment[i];
-            if self.has(e, t) || self.has(e, sys::pair(t, self.b.wildcard)) {
-                return Err(format!(
-                    "{} is DontFragment, which snapshots do not support yet",
-                    self.path(t)?
-                ));
-            }
-        }
+        // DontFragment parts live outside the table: read them from Flecs's sparse storage with the table's ids.
+        let sparse = self.dont_fragment_ids(e);
+        let mut parent_component = false;
         let select = self.host.as_ref().map_or(0, |h| h.select);
         // SAFETY: a C global set by ecs_init.
         let toggle = unsafe { sys::ECS_TOGGLE };
@@ -664,7 +728,7 @@ impl<'s> Walk<'s> {
         let mut pairs = Vec::new();
         let mut components = Vec::new();
         let mut isa = Vec::new();
-        for id in self.ids(e) {
+        for id in self.ids(e).into_iter().chain(sparse) {
             if id & toggle != 0 && !sys::is_pair(id) {
                 let c = id & sys::ECS_COMPONENT_MASK;
                 // SAFETY: plain query.
@@ -677,9 +741,9 @@ impl<'s> Walk<'s> {
                 continue;
             }
             if id == self.b.parent {
-                return Err(
-                    "it is in Parent storage, whose value is an entity id: not saved yet".into(),
-                );
+                // The parent itself is `parent` below (ecs_get_parent reads either storage).
+                parent_component = true;
+                continue;
             }
             if id == select {
                 continue;
@@ -739,10 +803,32 @@ impl<'s> Walk<'s> {
             0 => Ipld::Null,
             p => self.reference(p).map_err(|m| format!("its parent: {m}"))?,
         };
+        if parent_component && parent == Ipld::Null {
+            return Err("it has the Parent component but no parent".into());
+        }
+        // The saved children, in the order Flecs keeps (SPEC.md, "Host record": "Child order").
+        let kids: Vec<ecs_entity_t> = match ordered_children(self.w, e) {
+            None => Vec::new(),
+            Some(all) => {
+                let saved = &self.host.as_ref().ok_or("not a host walk")?.saved;
+                all.into_iter().filter(|c| saved.contains(c)).collect()
+            }
+        };
+        let children = if kids.is_empty() {
+            None
+        } else {
+            let mut refs = Vec::with_capacity(kids.len());
+            for c in kids {
+                refs.push(self.reference(c).map_err(|m| format!("its child: {m}"))?);
+            }
+            Some(refs)
+        };
         Ok(HostParts {
             id,
             name: self.name(e),
             parent,
+            parent_component,
+            children,
             tags,
             pairs,
             components,

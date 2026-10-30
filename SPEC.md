@@ -55,7 +55,7 @@ sets it as native libc does, so native and wasm agree. (Flecs 4.1.6 did not chec
 | map (described; a Rust `HashMap` or `BTreeMap`) | an array of `[key, value]`, sorted by the key's DAG-CBOR encoding, keys unique, so the order never depends on the map's iteration order |
 | runtime (described) | null: the type holds only process-local state (a physics body handle, a GPU buffer, a cache), so the part is saved but its value is not; a restore leaves the default the type's constructor makes, for its system to rebuild |
 | a Flecs map, anything else | an error that names the type |
-| a component marked `DontFragment` | an error: its values live outside the entity's type, where the walk does not read them yet |
+| a component marked `DontFragment` | in a script world, an error: its values live outside the entity's type, where that walk does not read them yet. A host record saves it like any other part ("Host record") |
 
 Errors name the component and the member path inside it, such as `component Card: member pos.x: ...` or
 `member pts[2].x`.
@@ -370,7 +370,10 @@ A changed table does not rebuild its entities' records outright. When every comp
 opaque or described types), the cache keeps the components' raw bytes, and an entity whose table and bytes are
 unchanged keeps its block. Entities with a component that is not plain data, or whose bytes changed, are
 re-encoded. An entity member is compared by its local id, so renaming or re-parenting the entity it points at
-(which changes a `{"path"}` ref) is seen only by `blocks_full`. `Host::blocks_new` returns only the blocks this Host has not returned since its cache
+(which changes a `{"path"}` ref) is seen only by `blocks_full`. Two things change a record without moving or
+dirtying the entity's table, so they are checked on every call: a parent's saved children and their order (a
+`Parent` child, `set_child_order`), compared with the list cached for it; and DontFragment parts, whose ids and
+bytes join the raw bytes above (an entity with a DontFragment part that is not plain data is re-encoded every call). `Host::blocks_new` returns only the blocks this Host has not returned since its cache
 was filled, for a store that kept every earlier result.
 
 ## Versioning
@@ -383,7 +386,10 @@ was filled, for a store that kept every earlier result.
   this spec lists, layouts must be well formed (rule slots as in "Rules", known primitive names, hash recomputed),
   and every value must fit its layout. Anything else is refused, because an unknown key may change what the record
   means. `check::document` in Rust and `checkDocument` in TS do this; the TS reader checks the layout hashes' shape
-  and leaves recomputing them to the Rust reader. Strict readers mean no key can be added within a version.
+  and leaves recomputing them to the Rust reader. Strict readers mean no key can be added within a version, except an
+  optional key left out wherever its feature is unused: every earlier document is then unchanged and still reads,
+  and an earlier reader refuses a document that uses it rather than misreading it. Host records' `children` and
+  `parent_component` were added to version 2 this way.
 - Anything else needs a new version.
 - Version 2 added `base` and `version` to layout records, `uptr`, `iptr` and opaque types, described types (`f16`,
   `bf16`, option, union, map, runtime), the MST child list and host documents. Readers of this version refuse version 1; nothing stored version 1 data outside tests.
@@ -411,12 +417,44 @@ Every saved entity must have an id, and two saved entities with one id are refus
 ### Host record
 
     {"id": bytes16, "name": text | null, "parent": ref | null,
-     "tags": [ref], "pairs": [...], "components": {...}, "isa": [ref]}
+     "tags": [ref], "pairs": [...], "components": {...}, "isa": [ref],
+     "children": [ref],          (only on a parent whose children Flecs keeps in order)
+     "parent_component": true}   (only when the parent is held in Flecs's Parent component)
 
 `tags`, `pairs` and `components` are as in "Entity record". `isa` lists the entity's direct bases, sorted by their
 ref's DAG-CBOR. There is no `inherited`: an inherited part belongs to the prefab, which is authored, not saved. The
-id component, the select tag, the name (`Identifier`) and `ChildOf` are not parts; `ChildOf`'s target is `parent`
-and the name is `name`. Ephemeral parts are left out.
+id component, the select tag, the name (`Identifier`), `ChildOf`, `Parent` and `(ParentDepth, n)` are not parts: the
+parent is `parent` and the name is `name`. Ephemeral parts are left out.
+
+**Hierarchy.** Flecs keeps a parent in one of two storages: the fragmenting `(ChildOf, p)` pair, or the
+non-fragmenting `Parent` component (`EcsParent`, whose `value` is p; `ecs_new_w_parent`). `parent` is p in both.
+`"parent_component": true` says the entity holds it in `Parent`; the key is left out for `ChildOf` and for an entity
+with no parent. The storage is saved because it is the host's choice, which its queries and tables see, and a
+restore recreates it.
+
+**Child order.** Flecs keeps an order for p's children when p has `OrderedChildren`, and always once any child of p
+is in `Parent` storage; the order covers p's children of both storages. Then p's record has `"children"`: its saved
+children in that order, each a `{"id"}` ref. It is left out when p has no saved child or Flecs keeps no order for p,
+so children without an order (`ChildOf` without `OrderedChildren`) are written as before. The order is the world's
+state (`set_child_order` changes it), so it is saved; the rest of the record is still the same bytes for the same
+state, whatever order the entities were made in.
+
+The order lives on the parent, as one list, because that is how Flecs holds it: a reorder rewrites one block, the
+parent's, and adding or removing a child rewrites the parent and that child. An index on each child would say the
+same, but an insert at the front would renumber and rewrite every sibling's block; a sortable key on each child (a
+fractional index) would not, but Flecs holds no such key, so it would not be a function of the world's state and two
+worlds in one state could write different bytes. The cost: a child whose parent is not saved has no order in the
+document, and a restore appends it after the parent's live children in document (id) order.
+
+**DontFragment parts.** A tag, component or pair whose type (or relationship) has `DontFragment` lives in Flecs's
+sparse storage, outside the entity's table. It is read from there and written into `tags`, `pairs` and `components`
+like any other part, with its value: an exclusive one such as `(InChunk, chunk)` is one pair. Nothing in the record
+says the storage; it belongs to the type, and adding the part in another world stores it the same way.
+
+A reader also checks: `parent_component` is `true` and only with a non-null `parent`; `children` is not empty and
+lists `{"id"}` refs to records of the document whose `parent` is this record, each such record exactly once; and a
+record whose `parent` is a record of the document and that has `parent_component` makes that parent list
+`children`.
 
 Refs in a host record:
 
@@ -426,8 +464,8 @@ Refs in a host record:
 - anything else (prefabs, components, modules, the host's named entities): `{"path"}`, refused when a segment is
   unnamed (`#n`), since that numbering is local to one world.
 
-Also refused, naming the entity and part: a `DontFragment` part, a disabled `CanToggle` component, `Parent`
-storage, a wildcard id, two targets of an exclusive relationship.
+Also refused, naming the entity and part: a disabled `CanToggle` component, a wildcard id, two targets of an
+exclusive relationship.
 
 ### Host document
 
@@ -456,13 +494,17 @@ one entity rewrites its block and O(log n) MST nodes. The root CID is the state 
    unless the caller remaps ids (`Ids::Remint`, whose function gives each saved id a fresh one; refs to saved entities
    follow the new ids).
 3. Create every entity with `ecs_new` and set its id. Nothing is placed or moved; restore makes new entities.
-4. Set parents (parents before children, refusing a cycle or a depth past `FLECS_DAG_DEPTH_MAX`) and names (refusing a
-   name its parent already has).
+4. Set parents (parents before children, refusing a cycle or a depth past `FLECS_DAG_DEPTH_MAX`), as `(ChildOf, p)`
+   or, for `parent_component`, the `Parent` component, and names (refusing a name its parent already has). A
+   document whose `children` do not match its parents is refused before this (see "Host record").
 5. Add `IsA` bases (copying their `Copy` parts), then pairs, tags and components, all in one deferred batch so
    each entity moves table once; then write each value in place (from the document's bytes, or the migrated value)
-   and mark it modified; then remove any part a base copied that the record does not list.
-6. Add the select tag last, so observers of it see whole entities.
-7. Optionally read every entity back and compare it with the record (`verify`).
+   and mark it modified; then remove any part a base copied that the record does not list. DontFragment parts are
+   added the same way.
+6. Put each restored parent's restored children in its `children` order (`ecs_set_child_order`). Children it had
+   before keep their places; the restored ones fill the places they were given, in the saved order.
+7. Add the select tag last, so observers of it see whole entities.
+8. Optionally read every entity back and compare it with the record (`verify`).
 
 On any error every entity made so far is deleted and the world is as it was, except for ids Flecs recycles.
 

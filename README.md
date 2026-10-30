@@ -167,8 +167,9 @@ not the bytes on disk. DAG-CBOR is canonical, has a CID link type, and has matur
 
 ## Limits
 
-- **Value types.** Opaque and map types, uptr and iptr, and DontFragment components are refused, and so are NaN and
-  infinities, which DAG-CBOR forbids.
+- **Value types.** Opaque and map types, uptr and iptr are refused, and so are NaN and infinities, which DAG-CBOR
+  forbids. DontFragment parts are refused in a script world; a host world saves them, and its `Parent` children with
+  their order (SPEC.md "Host record").
 - **Child count.** More than 4096 children under one parent is refused. SPEC.md has the MST plan for lifting this.
 - **Unnamed entities.** They are numbered per world (`#0`, `#1`), so they are not history-independent.
 - **Full rehash.** Each snapshot rehashes the whole subtree; incremental hashing is not built.

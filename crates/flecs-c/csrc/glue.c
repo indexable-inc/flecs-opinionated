@@ -54,6 +54,24 @@ int32_t glue_children(const ecs_world_t *world, ecs_entity_t parent, ecs_entity_
     return n;
 }
 
+/* The children Flecs keeps in order under `parent`: its (ChildOf, parent) record has ordered children when the parent
+ * has OrderedChildren, and always once a child is in Parent storage (master's non-fragmenting hierarchy). The list
+ * covers children of both storages, in that order. Returns -1 when Flecs keeps no order for `parent` (or it is not
+ * alive), else the count, with up to `cap` ids written to `out` (same contract as glue_children otherwise). */
+int32_t glue_ordered_children(const ecs_world_t *world, ecs_entity_t parent, ecs_entity_t *out, int32_t cap) {
+    const ecs_world_t *real = ecs_get_world(world);
+    if (!parent || !ecs_is_alive(real, parent)) return -1;
+    ecs_id_t id = ecs_childof(parent);
+    /* UNSURE(integrator): flecs_components_get / flecs_component_get_flags are FLECS_API on master c73ce7115
+     * (flecs.h "component record" accessors); ecs_component_record_t is opaque here, so the flags come through the
+     * accessor, called only when the record exists (it otherwise derives flags from the type). */
+    if (!flecs_components_get(real, id)) return -1;
+    if (!(flecs_component_get_flags(real, id) & EcsIdOrderedChildren)) return -1;
+    ecs_entities_t c = ecs_get_ordered_children(real, parent);
+    for (int32_t i = 0; i < c.count && i < cap; i++) out[i] = c.ids[i];
+    return c.count;
+}
+
 /* Every named entity without a parent, prefabs and disabled entities included (a raw walk of the
  * tables with a name, so no query features are needed). Same contract as glue_children. */
 int32_t glue_roots(ecs_world_t *world, ecs_entity_t *out, int32_t cap) {

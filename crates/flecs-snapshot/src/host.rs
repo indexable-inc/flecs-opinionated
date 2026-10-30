@@ -108,6 +108,10 @@ struct Cached {
     raw: Option<Vec<u8>>,
     /// Made by this call (not reused), so its block is new.
     new: bool,
+    /// Its saved children in Flecs's order, when its record lists them: a reorder or a `Parent` child moves no table.
+    kids: Option<Vec<ecs_entity_t>>,
+    /// It had DontFragment parts, which live outside its table, so its bytes are compared on every call.
+    sparse: bool,
 }
 
 #[derive(Default)]
@@ -185,21 +189,37 @@ fn type_ids(w: *const ecs_world_t, e: ecs_entity_t) -> Vec<ecs_id_t> {
     }
 }
 
-/// The bytes of every component `e` has (owned or inherited), in type order, or None when one is not plain data.
+/// The bytes of every component `e` has (owned or inherited), in type order, then each DontFragment id it owns
+/// (`sparse`, outside its table) with its bytes; None when one is not plain data.
 fn raw_of(
     w: *mut ecs_world_t,
     walk: &mut Walk<'_>,
     pod: &mut HashMap<ecs_entity_t, bool>,
     e: ecs_entity_t,
+    sparse: &[ecs_id_t],
 ) -> Option<Vec<u8>> {
     let mut out = Vec::new();
-    for id in type_ids(w, e) {
+    let ids = type_ids(w, e);
+    let in_table = ids.len();
+    for (k, id) in ids.into_iter().chain(sparse.iter().copied()).enumerate() {
+        if k >= in_table {
+            // A DontFragment part can come or go without moving the table, so its id is part of the bytes.
+            out.extend_from_slice(&id.to_le_bytes());
+        }
+        // Ids with flags other than a pair (a value pair such as `(ParentDepth, n)`, a toggle) hold no value.
+        if id & sys::ECS_ID_FLAGS_MASK != 0 && !sys::is_pair(id) {
+            continue;
+        }
         // SAFETY: plain query.
         let ty = unsafe { sys::ecs_get_typeid(w, id) };
         if ty == 0 {
             continue;
         }
-        let is = *pod.entry(ty).or_insert_with(|| walk.is_pod(ty));
+        // `Parent` (the non-fragmenting parent, an entity id) is plain data whatever Flecs meta says of it: every
+        // `Parent` child at one depth shares a table, so reading it as not plain would re-encode them all.
+        // SAFETY: a C global set by ecs_init.
+        let is = ty == unsafe { sys::FLECS_IDEcsParentID_ }
+            || *pod.entry(ty).or_insert_with(|| walk.is_pod(ty));
         if !is {
             return None;
         }
@@ -294,6 +314,10 @@ struct Plan<'a> {
     raw: &'a [u8],
     name: Option<String>,
     parent: Option<Ipld>,
+    /// The parent is held in Flecs's `Parent` component.
+    parent_component: bool,
+    /// Its saved children in Flecs's order (SPEC.md, "Host record").
+    children: Option<Vec<Ipld>>,
     isa: Vec<Ipld>,
     tags: Vec<Ipld>,
     /// (rel, tgt, data: (type, value))
@@ -321,7 +345,9 @@ struct RawRec<'a> {
     tags: Vec<Ipld>,
     pairs: Vec<(Ipld, Ipld, Option<RawValue<'a>>)>,
     parent: Option<Ipld>,
+    children: Option<Vec<Ipld>>,
     components: Vec<RawValue<'a>>,
+    parent_component: bool,
 }
 
 /// Resolves nothing: values are only checked, not written.
@@ -334,7 +360,8 @@ impl Resolve for NoIds {
 }
 
 /// Reads a host document's structure in DAG-CBOR order (ids, layouts, version, entities; a record's id, isa, name,
-/// tags, pairs, parent, components), checking everything but the values, which `Walk::read_into` checks.
+/// tags, pairs, parent, children, components, parent_component, the last two keys optional), checking everything but
+/// the values, which `Walk::read_into` checks.
 fn parse_doc(b: &[u8]) -> R<RawDoc<'_>> {
     let mut d = cbor::Decoder::new(b);
     let n = d.expect(5, "the host document (a map)")?;
@@ -386,11 +413,13 @@ fn raw_refs(d: &mut cbor::Decoder<'_>, what: &str) -> R<Vec<Ipld>> {
 fn raw_record<'a>(d: &mut cbor::Decoder<'a>) -> R<RawRec<'a>> {
     let start = d.at;
     let n = d.expect(5, "a host record (a map)")?;
-    if n != 7 {
+    if !(7..=9).contains(&n) {
         return Err(format!(
-            "the host record has {n} keys, not id, isa, name, tags, pairs, parent and components"
+            "the host record has {n} keys, not id, isa, name, tags, pairs, parent and components (and optionally \
+             children and parent_component)"
         ));
     }
+    let mut keys = 7;
     d.key("id")?;
     let id: [u8; 16] = match d.value(1)? {
         Ipld::Bytes(b) => b
@@ -440,6 +469,20 @@ fn raw_record<'a>(d: &mut cbor::Decoder<'a>) -> R<RawRec<'a>> {
     } else {
         Some(raw_ref(d, "parent")?)
     };
+    let mut children = None;
+    if n > keys {
+        let at = d.at;
+        if d.str()? == "children" {
+            let kids = raw_refs(d, "child")?;
+            if kids.is_empty() {
+                return Err("children is empty (it is left out when there are none)".into());
+            }
+            children = Some(kids);
+            keys += 1;
+        } else {
+            d.at = at;
+        }
+    }
     d.key("components")?;
     let n = d.expect(5, "components (a map)")?;
     let mut components: Vec<RawValue<'a>> = Vec::new();
@@ -459,6 +502,21 @@ fn raw_record<'a>(d: &mut cbor::Decoder<'a>) -> R<RawRec<'a>> {
         d.key("value")?;
         components.push((ty, hash, d.skip()?));
     }
+    let mut parent_component = false;
+    if n > keys {
+        d.key("parent_component")?;
+        if d.value(1)? != Ipld::Bool(true) {
+            return Err("parent_component is not true (it is left out otherwise)".into());
+        }
+        if parent.is_none() {
+            return Err("parent_component is set but there is no parent".into());
+        }
+        parent_component = true;
+        keys += 1;
+    }
+    if keys != n {
+        return Err(format!("the host record has {n} keys, but {keys} known ones"));
+    }
     Ok(RawRec {
         id,
         raw: d.since(start),
@@ -467,7 +525,9 @@ fn raw_record<'a>(d: &mut cbor::Decoder<'a>) -> R<RawRec<'a>> {
         tags,
         pairs,
         parent,
+        children,
         components,
+        parent_component,
     })
 }
 
@@ -777,6 +837,7 @@ impl Host {
         let w = self.w;
         let saved = self.saved(sel)?;
         let cfg = self.cfg(&saved, opts);
+        let saved_set: HashSet<ecs_entity_t> = saved.iter().copied().collect();
         let Host {
             s, cache, ids_path, ..
         } = self;
@@ -822,11 +883,21 @@ impl Host {
                 new_tables.insert(tk, now);
                 !same
             });
+            // What changes a record without moving or dirtying its table (SPEC.md, "Incremental hashing"): its saved
+            // children's order, and its DontFragment parts.
+            let kids = crate::walk::ordered_children(w, e)
+                .map(|all| {
+                    all.into_iter()
+                        .filter(|c| saved_set.contains(c))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|k| !k.is_empty());
+            let sparse = walk.dont_fragment_ids(e);
             let mut raw = None;
             let reuse = cache.entities.get(&e).is_some_and(|c| {
-                c.table == tk && c.used.iter().all(|t| !changed_types.contains(t))
-            }) && (!changed || {
-                raw = raw_of(w, &mut walk, &mut cache.pod, e);
+                c.table == tk && c.kids == kids && c.used.iter().all(|t| !changed_types.contains(t))
+            }) && (!(changed || !sparse.is_empty() || cache.entities[&e].sparse) || {
+                raw = raw_of(w, &mut walk, &mut cache.pod, e, &sparse);
                 raw.is_some() && cache.entities[&e].raw == raw
             });
             let c = if reuse {
@@ -838,7 +909,7 @@ impl Host {
                 c
             } else {
                 if raw.is_none() {
-                    raw = raw_of(w, &mut walk, &mut cache.pod, e);
+                    raw = raw_of(w, &mut walk, &mut cache.pod, e, &sparse);
                 }
                 let (id, bytes) =
                     walk.host_record_cbor(e)
@@ -855,6 +926,8 @@ impl Host {
                     used,
                     raw,
                     new: true,
+                    kids,
+                    sparse: !sparse.is_empty(),
                 }
             };
             entries.push((c.id.to_vec(), c.cid));
@@ -1100,6 +1173,8 @@ impl Host {
                 raw: r.raw,
                 name: r.name,
                 parent: r.parent,
+                parent_component: r.parent_component,
+                children: r.children,
                 isa: r.isa,
                 tags: r.tags,
                 pairs,
@@ -1187,6 +1262,52 @@ impl Host {
                 ));
             }
         }
+        // Child order (SPEC.md, "Host record"): a record's `children` lists exactly the records whose parent it is, and
+        // a record with a child in `Parent` storage lists them.
+        let mut kids_of: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, p) in plans.iter().enumerate() {
+            if let Some(pi) = parent_of(p) {
+                kids_of.entry(pi).or_default().push(i);
+            }
+        }
+        for (i, p) in plans.iter().enumerate() {
+            let at = |m: &str| format!("entity {}: {m}", hex(&p.id));
+            let mine = kids_of.get(&i).map_or(&[][..], Vec::as_slice);
+            match &p.children {
+                Some(list) => {
+                    let mut got = Vec::with_capacity(list.len());
+                    for r in list {
+                        let j = match r {
+                            Ipld::Map(m) => match m.get("id") {
+                                Some(Ipld::Bytes(b)) => <[u8; 16]>::try_from(b.as_slice())
+                                    .ok()
+                                    .and_then(|id| index.get(&id).copied()),
+                                _ => None,
+                            },
+                            _ => None,
+                        }
+                        .ok_or_else(|| at("its children list an entity that is not in the document"))?;
+                        got.push(j);
+                    }
+                    let mut want = mine.to_vec();
+                    want.sort_unstable();
+                    let listed = got.len();
+                    got.sort_unstable();
+                    got.dedup();
+                    if got.len() != listed || got != want {
+                        return Err(at(
+                            "its children are not exactly the entities whose parent it is, each once",
+                        ));
+                    }
+                }
+                None if mine.iter().any(|&j| plans[j].parent_component) => {
+                    return Err(at(
+                        "a child of it is in Parent storage, but its record lists no child order",
+                    ));
+                }
+                None => {}
+            }
+        }
         let mut order: Vec<usize> = (0..plans.len()).collect();
         order.sort_by_key(|i| depth[*i]);
         // Make the entities; from here on, an error deletes them.
@@ -1239,8 +1360,23 @@ impl Host {
             let parent = match &p.parent {
                 Some(r) => {
                     let pe = ids.entity(r).map_err(|m| at(format!("its parent: {m}")))?;
-                    // SAFETY: both alive.
-                    unsafe { sys::ecs_add_id(w, e, sys::pair(child_of, pe)) };
+                    if p.parent_component {
+                        // Flecs's non-fragmenting hierarchy: the `Parent` component holds the parent (EcsParent is one
+                        // entity id), as ecs_new_w_parent makes it; Flecs appends `e` to the parent's ordered children.
+                        // SAFETY: both alive (ecs_set_id refuses a dead or zero parent); the value is 8 bytes.
+                        unsafe {
+                            sys::ecs_set_id(
+                                w,
+                                e,
+                                sys::FLECS_IDEcsParentID_,
+                                std::mem::size_of::<ecs_entity_t>(),
+                                (&raw const pe).cast(),
+                            )
+                        };
+                    } else {
+                        // SAFETY: both alive.
+                        unsafe { sys::ecs_add_id(w, e, sys::pair(child_of, pe)) };
+                    }
                     pe
                 }
                 None => 0,
@@ -1249,6 +1385,8 @@ impl Host {
                 let c = CString::new(n.as_str())
                     .map_err(|_| at("its name contains a NUL byte".into()))?;
                 // SAFETY: plain lookup and rename with a NUL-terminated name.
+                // UNSURE(integrator): on master the (ChildOf, parent) name index covers `Parent` children too (the
+                // reparent hook moves names between indexes), so this finds a sibling of either storage.
                 unsafe {
                     if sys::ecs_lookup_child(w, parent, c.as_ptr()) != 0 {
                         return Err(at(format!("its parent already has a child named {n:?}")));
@@ -1267,6 +1405,7 @@ impl Host {
                 naming: None,
             },
         );
+        walk.find_dont_fragment();
         // Each entity's parts are added as one batch (a stage, or defer on a host's 4.1.6), so Flecs moves it to its
         // final table once. Reads still go to `w`.
         // SAFETY: the world is not deferred (restore checked) and not in use elsewhere.
@@ -1328,6 +1467,8 @@ impl Host {
             let e = ent(p);
             for (id, ty, v) in vals {
                 // SAFETY: `e` owns `id` (added above), whose storage is a live value of `ty`.
+                // UNSURE(integrator): for a DontFragment part this is its sparse storage; ecs_get_mut_id goes through
+                // flecs_get_component_ptr, which reads sparse component records on master.
                 let ptr = unsafe { sys::ecs_get_mut_id(w, e, *id) }.cast::<u8>();
                 let r = if ptr.is_null() {
                     Err("has no storage after it was added".to_string())
@@ -1350,14 +1491,45 @@ impl Host {
                 unsafe { sys::ecs_modified_id(w, e, *id) };
             }
         }
-        // Parts a base copied that the record does not list.
+        // Parts a base copied that the record does not list (DontFragment ones included).
         for (p, exp) in plans.iter().zip(&expected) {
             let e = ent(p);
-            for id in type_ids(w, e) {
+            let sparse = walk.dont_fragment_ids(e);
+            for id in type_ids(w, e).into_iter().chain(sparse) {
                 if id != self.select && !exp.contains(&id) && walk.listed_part(id)? {
                     // SAFETY: `id` is in `e`'s type.
                     unsafe { sys::ecs_remove_id(w, e, id) };
                 }
+            }
+        }
+        // Child order: each restored parent's restored children go to the places they hold, in the saved order.
+        for p in plans {
+            let Some(list) = &p.children else { continue };
+            let pe = ent(p);
+            let at = |m: &str| format!("entity {}: {m}", hex(&p.id));
+            let want: Vec<ecs_entity_t> = list
+                .iter()
+                .map(|r| ids.entity(r))
+                .collect::<R<_>>()
+                .map_err(|m| at(&format!("a child: {m}")))?;
+            let Some(cur) = crate::walk::ordered_children(w, pe) else {
+                return Err(at(
+                    "its record lists a child order, but Flecs keeps none for it (it needs OrderedChildren, or a \
+                     child in Parent storage)",
+                ));
+            };
+            let listed: HashSet<ecs_entity_t> = want.iter().copied().collect();
+            let slots: Vec<usize> = (0..cur.len()).filter(|i| listed.contains(&cur[*i])).collect();
+            if slots.len() != want.len() {
+                return Err(at("its listed children are not all its children after the restore"));
+            }
+            let mut next = cur.clone();
+            for (slot, c) in slots.iter().zip(&want) {
+                next[*slot] = *c;
+            }
+            if next != cur {
+                // SAFETY: `next` is a permutation of `pe`'s ordered children; the world is not deferred.
+                unsafe { sys::ecs_set_child_order(w, pe, next.as_ptr(), next.len() as i32) };
             }
         }
         if verify {
@@ -1404,9 +1576,12 @@ impl Host {
                 }
                 if list(&g["tags"]).len() != p.tags.len()
                     || list(&g["pairs"]).len() != p.pairs.len()
+                    || g.contains_key("parent_component") != p.parent_component
+                    || g.get("children").map(|c| list(c).len()) != p.children.as_ref().map(Vec::len)
                 {
                     return Err(format!(
-                        "verify: entity {}: its tags or pairs read back differently from its record",
+                        "verify: entity {}: its tags, pairs, parent storage or children read back differently \
+                         from its record",
                         hex(&p.id)
                     ));
                 }

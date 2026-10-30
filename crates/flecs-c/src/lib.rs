@@ -193,6 +193,21 @@ unsafe extern "C" {
         cap: i32,
     ) -> i32;
     pub fn glue_roots(world: *mut ecs_world_t, out: *mut ecs_entity_t, cap: i32) -> i32;
+    /// The children Flecs keeps in order under `parent` (OrderedChildren, or any child in `Parent` storage), both
+    /// storages, in that order; -1 when Flecs keeps no order for it (csrc/glue.c).
+    pub fn glue_ordered_children(
+        world: *const ecs_world_t,
+        parent: ecs_entity_t,
+        out: *mut ecs_entity_t,
+        cap: i32,
+    ) -> i32;
+    /// Reorders `parent`'s ordered children; `children` must be exactly its current children. Not deferred.
+    pub fn ecs_set_child_order(
+        world: *mut ecs_world_t,
+        parent: ecs_entity_t,
+        children: *const ecs_entity_t,
+        child_count: i32,
+    );
     pub fn glue_with(
         world: *const ecs_world_t,
         id: ecs_id_t,

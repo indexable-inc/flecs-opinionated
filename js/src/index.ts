@@ -136,6 +136,11 @@ export interface HostRecord {
   components: Record<string, ComponentValue>;
   /** The direct bases, sorted by their ref's DAG-CBOR. */
   isa: Ref[];
+  /** Its saved children in Flecs's order, only when Flecs keeps one for it (OrderedChildren, or a child in Parent
+   * storage) and it has a saved child. */
+  children?: Ref[];
+  /** Present (and true) only when the parent is held in Flecs's non-fragmenting Parent component. */
+  parent_component?: true;
 }
 
 /** A host world's document form (SPEC.md, "Host document"): entities sorted by id. */
@@ -633,6 +638,7 @@ export async function readHostRoot(get: GetBlock, cid: CID): Promise<HostWorld> 
     if (!bytesEqual(rec.id, id)) throw new Error(`${what}: the block's id is ${hex(rec.id)}`);
     entities.push([id, rec]);
   }
+  checkHostChildren(entities.map(([, r]) => r));
   return { ids: m.ids, layouts, entities };
 }
 
@@ -1097,13 +1103,62 @@ export function checkEntity(v: unknown, form: "document" | "block", layouts: Lay
   }
 }
 
-/** A host record (SPEC.md, "Host record"), with exactly the keys it defines. */
+/** A host record (SPEC.md, "Host record"), with exactly the keys it defines (`children` and `parent_component` only
+ * when used). How `children` matches the other records is `checkHostChildren`'s check. */
 export function checkHostEntity(v: unknown, layouts: Layouts): HostRecord {
-  const m = exact(v, ["id", "name", "parent", "tags", "pairs", "components", "isa"], "host record");
+  const base = ["id", "name", "parent", "tags", "pairs", "components", "isa"];
+  const optional = ["children", "parent_component"].filter((k) => typeof v === "object" && v !== null && k in v);
+  const m = exact(v, [...base, ...optional], "host record");
   if (!(m.id instanceof Uint8Array && m.id.length === 16)) throw new Error("host record: id is not 16 bytes");
   if (m.parent !== null) checkRef(m.parent, "parent");
+  if ("parent_component" in m) {
+    if (m.parent_component !== true) throw new Error("host record: parent_component is not true (it is left out otherwise)");
+    if (m.parent === null) throw new Error("host record: parent_component is set but there is no parent");
+  }
+  if ("children" in m) {
+    const kids = list(m.children, "children");
+    if (kids.length === 0) throw new Error("host record: children is empty (it is left out when there are none)");
+    for (const k of kids) {
+      checkRef(k, "child");
+      if (!(k as Obj).id) throw new Error('host record: a child is not an {"id"} ref');
+    }
+  }
   checkParts(m, layouts);
   return v as HostRecord;
+}
+
+function refId(r: Ref | null): string | null {
+  return r !== null && "id" in r && r.id instanceof Uint8Array ? hex(r.id) : null;
+}
+
+/** The child order across a host world's records (SPEC.md, "Host record"): each `children` lists exactly the records
+ * whose parent it is, each once, and a record with a child in Parent storage lists them. */
+export function checkHostChildren(records: HostRecord[]): void {
+  const index = new Map(records.map((r, i) => [hex(r.id), i]));
+  const kidsOf = new Map<number, number[]>();
+  records.forEach((r, i) => {
+    const p = refId(r.parent);
+    const pi = p === null ? undefined : index.get(p);
+    if (pi !== undefined) kidsOf.set(pi, [...(kidsOf.get(pi) ?? []), i]);
+  });
+  records.forEach((r, i) => {
+    const mine = kidsOf.get(i) ?? [];
+    if (r.children !== undefined) {
+      const got = r.children.map((k) => {
+        const id = refId(k);
+        const j = id === null ? undefined : index.get(id);
+        if (j === undefined) throw new Error(`entity ${hex(r.id)}: its children list an entity that is not in the document`);
+        return j;
+      });
+      const a = [...new Set(got)].sort((x, y) => x - y);
+      const b = [...mine].sort((x, y) => x - y);
+      if (a.length !== got.length || a.length !== b.length || a.some((x, k) => x !== b[k])) {
+        throw new Error(`entity ${hex(r.id)}: its children are not exactly the entities whose parent it is, each once`);
+      }
+    } else if (mine.some((j) => records[j].parent_component === true)) {
+      throw new Error(`entity ${hex(r.id)}: a child of it is in Parent storage, but its record lists no child order`);
+    }
+  });
 }
 
 /** A whole host document, strictly: the version, the id component's path, the layout records and every host record,
@@ -1125,6 +1180,7 @@ export function checkHostDocument(v: unknown): HostDocument {
     if (prev !== null && compareBytes(prev, rec.id) >= 0) throw new Error(`entity ${i}: id ${hex(rec.id)} is not after ${hex(prev)}`);
     prev = rec.id;
   }
+  checkHostChildren((v as HostDocument).entities);
   return v as HostDocument;
 }
 
