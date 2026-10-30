@@ -55,10 +55,7 @@ fn frame_action_trampoline(
 }
 
 #[flecs_ecs_derive::extern_abi]
-fn run_action_trampoline(
-    world: *mut sys::ecs_world_t,
-    desc: *mut sys::ecs_app_desc_t,
-) -> c_int {
+fn run_action_trampoline(world: *mut sys::ecs_world_t, desc: *mut sys::ecs_app_desc_t) -> c_int {
     // SAFETY: flecs passes a valid world and desc pointer to the run action.
     let actions = unsafe { ((*desc).ctx as *mut AppActions).as_mut() };
     let Some(action) = actions.and_then(|actions| actions.run.as_mut()) else {

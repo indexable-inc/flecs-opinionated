@@ -90,7 +90,9 @@ impl<'a> ScriptEntityView<'a> {
     /// True if success, false if failed.
     pub fn reload(&self, code: Option<&str>) -> bool {
         let code = code.map(|c| compact_str::format_compact!("{}\0", c));
-        let code_ptr = code.as_ref().map_or(core::ptr::null(), |c| c.as_ptr() as *const _);
+        let code_ptr = code
+            .as_ref()
+            .map_or(core::ptr::null(), |c| c.as_ptr() as *const _);
         // SAFETY: the world is live for 'a; `code_ptr` is null or a NUL-terminated string that outlives the call.
         unsafe { sys::ecs_script_reload(self.world.world_ptr_mut(), *self.id, code_ptr) == 0 }
     }

@@ -44,7 +44,9 @@ impl World {
         let world = self.ptr_mut();
         let cmd = compact_str::format_compact!("{}\0", cmd);
         // SAFETY: the world is live; cmd is NUL-terminated and outlives the call.
-        let mut res = unsafe { sys::ecs_command_run(world, *session.into_entity(self), cmd.as_ptr() as *const _) };
+        let mut res = unsafe {
+            sys::ecs_command_run(world, *session.into_entity(self), cmd.as_ptr() as *const _)
+        };
 
         let value = if res.result.type_ != 0 && !res.result.ptr.is_null() {
             // SAFETY: the result value is a live value of type `type_` owned by `res`.
@@ -53,8 +55,14 @@ impl World {
                 None
             } else {
                 // SAFETY: ecs_ptr_to_expr returns a NUL-terminated string allocated with the os api.
-                let s = unsafe { CStr::from_ptr(expr) }.to_string_lossy().into_owned();
-                unsafe { sys::ecs_os_api.free_.expect("os api is missing")(expr as *mut core::ffi::c_void) };
+                let s = unsafe { CStr::from_ptr(expr) }
+                    .to_string_lossy()
+                    .into_owned();
+                unsafe {
+                    sys::ecs_os_api.free_.expect("os api is missing")(
+                        expr as *mut core::ffi::c_void,
+                    )
+                };
                 Some(s)
             }
         } else {
@@ -69,7 +77,12 @@ impl World {
             // SAFETY: i < count; each entry is a NUL-terminated string or null.
             let e = unsafe { *first.add(i) };
             if !e.is_null() {
-                errors.push(unsafe { CStr::from_ptr(e) }.to_string_lossy().as_ref().to_owned());
+                errors.push(
+                    unsafe { CStr::from_ptr(e) }
+                        .to_string_lossy()
+                        .as_ref()
+                        .to_owned(),
+                );
             }
         }
 

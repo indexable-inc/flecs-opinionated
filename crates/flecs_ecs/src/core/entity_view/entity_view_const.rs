@@ -904,8 +904,8 @@ impl<'a> EntityView<'a> {
             return None;
         }
 
-        NonNull::new(unsafe { sys::ecs_rust_record_find(self.world.world_ptr(), *self.id) }).and_then(
-            |record| {
+        NonNull::new(unsafe { sys::ecs_rust_record_find(self.world.world_ptr(), *self.id) })
+            .and_then(|record| {
                 let table = NonNull::new(unsafe { (*record.as_ptr()).table })?;
                 Some(unsafe {
                     TableRange::new_raw(
@@ -915,8 +915,7 @@ impl<'a> EntityView<'a> {
                         1,
                     )
                 })
-            },
-        )
+            })
     }
 
     /// Iterate over component ids of an entity.
@@ -1257,7 +1256,10 @@ impl<'a> EntityView<'a> {
             return Vec::new();
         }
         // SAFETY: `ids` points to `count` entity ids; Entity is repr(transparent) over u64.
-        unsafe { core::slice::from_raw_parts(children.ids as *const Entity, children.count as usize) }.to_vec()
+        unsafe {
+            core::slice::from_raw_parts(children.ids as *const Entity, children.count as usize)
+        }
+        .to_vec()
     }
 
     /// Returns the count of targets for a given relationship id.
@@ -1496,7 +1498,8 @@ impl<'a, Return> EntityViewGet<'a, Return> for EntityView<'a> {
                 // Flecs master: no implicit defer; lock the table like C++'s invoke_get, so a
                 // structural change to it in the callback asserts (debug builds).
                 // SAFETY: record is live for self.id; the guard unlocks before returning.
-                let _table_lock = unsafe { TableLockGuard::lock(self.world.world_ptr_mut(), (*record).table) };
+                let _table_lock =
+                    unsafe { TableLockGuard::lock(self.world.world_ptr_mut(), (*record).table) };
                 let ret = callback(tuple);
                 return Some(ret);
             }
@@ -1536,9 +1539,10 @@ impl<'a, Return> EntityViewGet<'a, Return> for EntityView<'a> {
         #[cfg(not(feature = "flecs_safety_locks"))]
         {
             // Flecs master: no implicit defer; lock the table like C++'s invoke_get, so a
-                // structural change to it in the callback asserts (debug builds).
-                // SAFETY: record is live for self.id; the guard unlocks before returning.
-                let _table_lock = unsafe { TableLockGuard::lock(self.world.world_ptr_mut(), (*record).table) };
+            // structural change to it in the callback asserts (debug builds).
+            // SAFETY: record is live for self.id; the guard unlocks before returning.
+            let _table_lock =
+                unsafe { TableLockGuard::lock(self.world.world_ptr_mut(), (*record).table) };
             callback(tuple)
         }
     }

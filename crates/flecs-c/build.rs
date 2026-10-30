@@ -157,7 +157,11 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={}", p.display());
     }
-    let mut sources = vec![flecs.join("flecs.c"), flecs.join("flecs.h"), root.join("csrc")];
+    let mut sources = vec![
+        flecs.join("flecs.c"),
+        flecs.join("flecs.h"),
+        root.join("csrc"),
+    ];
     if wasm {
         sources.push(root.join("wasm-libc"));
     }
@@ -175,7 +179,8 @@ fn main() {
         b.compile("flecs");
         return;
     };
-    let recipe = format!("{target}\n{defines:?}\n{flags:?}\n{optional:?}\nopt 2, no debug, no warnings");
+    let recipe =
+        format!("{target}\n{defines:?}\n{flags:?}\n{optional:?}\nopt 2, no debug, no warnings");
     let key = match key(&b, &recipe, &sources) {
         Ok(k) => k,
         Err(e) => panic!("flecs-c cache key: {e}"),

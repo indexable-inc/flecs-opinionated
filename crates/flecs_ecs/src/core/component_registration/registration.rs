@@ -30,10 +30,7 @@ impl ScopeWithGuard {
             }
         };
 
-        Self {
-            world,
-            prev_scope,
-        }
+        Self { world, prev_scope }
     }
 }
 

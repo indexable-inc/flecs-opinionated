@@ -875,7 +875,9 @@ fn host_children(es: &[Ipld]) -> R<()> {
                 let mut got = Vec::new();
                 for k in list(c, "children")? {
                     let j = id_of(k).and_then(|id| index.get(&id)).ok_or_else(|| {
-                        format!("entity {i}: its children list an entity that is not in the document")
+                        format!(
+                            "entity {i}: its children list an entity that is not in the document"
+                        )
                     })?;
                     got.push(*j);
                 }
@@ -890,7 +892,10 @@ fn host_children(es: &[Ipld]) -> R<()> {
                     ));
                 }
             }
-            None if mine.iter().any(|&j| rec(&es[j]).contains_key("parent_component")) => {
+            None if mine
+                .iter()
+                .any(|&j| rec(&es[j]).contains_key("parent_component")) =>
+            {
                 return Err(format!(
                     "entity {i}: a child of it is in Parent storage, but its record lists no child order"
                 ));

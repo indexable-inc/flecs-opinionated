@@ -9,6 +9,8 @@ rust-version = "1.97"
 publish = false
 
 [lib]
+# Its examples use flecs_ecs, which a proc-macro crate cannot depend on; flecs_ecs's own tests cover them.
+doctest = false
 proc-macro = true
 name = "flecs_ecs_derive"
 

@@ -122,7 +122,11 @@ fn parent_children_and_dont_fragment_round_trip() {
         )
         .unwrap();
     assert_eq!(r.entities.len(), 5);
-    assert_eq!(hb.encode(&sel, &opts).unwrap(), doc, "re-encode is byte-identical");
+    assert_eq!(
+        hb.encode(&sel, &opts).unwrap(),
+        doc,
+        "re-encode is byte-identical"
+    );
 
     let ship_b = find(&b, &r.entities, SHIP);
     assert_eq!(order(&b, ship_b), vec![20, 30, 10], "child order survives");
@@ -131,7 +135,8 @@ fn parent_children_and_dont_fragment_round_trip() {
     // UNSURE(integrator): EntityView::target on a DontFragment exclusive relationship.
     assert_eq!(p10_b.target(id::<InChunk>(), 0).map(|t| *t), Some(chunk_b));
     assert_eq!(
-        b.entity_from_id(find(&b, &r.entities, 30)).get::<&Heat>(|h| h.value),
+        b.entity_from_id(find(&b, &r.entities, 30))
+            .get::<&Heat>(|h| h.value),
         2.5
     );
 
@@ -144,6 +149,9 @@ fn parent_children_and_dont_fragment_round_trip() {
     assert_eq!(reordered.root, ha.blocks_full(&sel, &opts).unwrap().root);
     p30.set(Heat { value: 9.0 });
     let heated = ha.blocks(&sel, &opts).unwrap();
-    assert_ne!(heated.root, reordered.root, "a DontFragment value change changes the root");
+    assert_ne!(
+        heated.root, reordered.root,
+        "a DontFragment value change changes the root"
+    );
     assert_eq!(heated.root, ha.blocks_full(&sel, &opts).unwrap().root);
 }

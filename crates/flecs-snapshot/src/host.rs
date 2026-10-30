@@ -440,9 +440,9 @@ fn raw_record<'a>(d: &mut cbor::Decoder<'a>) -> R<RawRec<'a>> {
     d.key("tags")?;
     let tags = raw_refs(d, "tag")?;
     d.key("pairs")?;
-    let n = d.expect(4, "pairs (a list)")?;
+    let n_pairs = d.expect(4, "pairs (a list)")?;
     let mut pairs = Vec::new();
-    for _ in 0..n {
+    for _ in 0..n_pairs {
         let k = d.expect(4, "a pair")?;
         let (r, t) = (raw_ref(d, "relationship")?, raw_ref(d, "target")?);
         let data = match k {
@@ -484,9 +484,9 @@ fn raw_record<'a>(d: &mut cbor::Decoder<'a>) -> R<RawRec<'a>> {
         }
     }
     d.key("components")?;
-    let n = d.expect(5, "components (a map)")?;
+    let n_components = d.expect(5, "components (a map)")?;
     let mut components: Vec<RawValue<'a>> = Vec::new();
-    for _ in 0..n {
+    for _ in 0..n_components {
         let ty = d.str()?;
         if components
             .last()
@@ -515,7 +515,9 @@ fn raw_record<'a>(d: &mut cbor::Decoder<'a>) -> R<RawRec<'a>> {
         keys += 1;
     }
     if keys != n {
-        return Err(format!("the host record has {n} keys, but {keys} known ones"));
+        return Err(format!(
+            "the host record has {n} keys, but {keys} known ones"
+        ));
     }
     Ok(RawRec {
         id,
@@ -1092,7 +1094,8 @@ impl Host {
         // SAFETY: plain query.
         if unsafe { sys::glue_is_deferred(w) } {
             return Err(
-                "the world is deferred (a stage, or in a system or observer): restore outside one".into(),
+                "the world is deferred (a stage, or in a system or observer): restore outside one"
+                    .into(),
             );
         }
         let raw = parse_doc(doc).map_err(|e| format!("the document: {e}"))?;
@@ -1286,7 +1289,9 @@ impl Host {
                             },
                             _ => None,
                         }
-                        .ok_or_else(|| at("its children list an entity that is not in the document"))?;
+                        .ok_or_else(|| {
+                            at("its children list an entity that is not in the document")
+                        })?;
                         got.push(j);
                     }
                     let mut want = mine.to_vec();
@@ -1519,9 +1524,13 @@ impl Host {
                 ));
             };
             let listed: HashSet<ecs_entity_t> = want.iter().copied().collect();
-            let slots: Vec<usize> = (0..cur.len()).filter(|i| listed.contains(&cur[*i])).collect();
+            let slots: Vec<usize> = (0..cur.len())
+                .filter(|i| listed.contains(&cur[*i]))
+                .collect();
             if slots.len() != want.len() {
-                return Err(at("its listed children are not all its children after the restore"));
+                return Err(at(
+                    "its listed children are not all its children after the restore",
+                ));
             }
             let mut next = cur.clone();
             for (slot, c) in slots.iter().zip(&want) {
@@ -1598,7 +1607,8 @@ impl Host {
         // SAFETY: plain query.
         if unsafe { sys::glue_is_deferred(w) } {
             return Err(
-                "the world is deferred (a stage, or in a system or observer): migrate outside one".into(),
+                "the world is deferred (a stage, or in a system or observer): migrate outside one"
+                    .into(),
             );
         }
         let (ft, tt) = (lookup(w, from)?, lookup(w, to)?);

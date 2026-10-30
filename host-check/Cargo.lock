@@ -245,6 +245,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "flecs_ecs_sys",
+ "sha2",
 ]
 
 [[package]]
@@ -286,7 +287,6 @@ dependencies = [
 [[package]]
 name = "flecs_ecs"
 version = "0.2.2"
-source = "git+https://github.com/Indra-db/Flecs-Rust?rev=bf956db99b69d41ee142c9d52054911af28d7e93#bf956db99b69d41ee142c9d52054911af28d7e93"
 dependencies = [
  "bitflags",
  "compact_str",
@@ -300,7 +300,6 @@ dependencies = [
 [[package]]
 name = "flecs_ecs_derive"
 version = "0.2.0"
-source = "git+https://github.com/Indra-db/Flecs-Rust?rev=bf956db99b69d41ee142c9d52054911af28d7e93#bf956db99b69d41ee142c9d52054911af28d7e93"
 dependencies = [
  "proc-macro2",
  "quote",

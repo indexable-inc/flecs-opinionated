@@ -96,6 +96,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 
 [[package]]
+name = "capture-stdio"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c4163737c93d1f359397c377bf3ab1116f4eddb093055b5e7e7f4f06b276a11"
+dependencies = [
+ "libc",
+ "os_pipe",
+]
+
+[[package]]
 name = "castaway"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -315,9 +325,9 @@ dependencies = [
 [[package]]
 name = "flecs_ecs"
 version = "0.2.2"
-source = "git+https://github.com/Indra-db/Flecs-Rust?rev=bf956db99b69d41ee142c9d52054911af28d7e93#bf956db99b69d41ee142c9d52054911af28d7e93"
 dependencies = [
  "bitflags",
+ "capture-stdio",
  "compact_str",
  "flecs_ecs_derive",
  "flecs_ecs_sys",
@@ -329,7 +339,6 @@ dependencies = [
 [[package]]
 name = "flecs_ecs_derive"
 version = "0.2.0"
-source = "git+https://github.com/Indra-db/Flecs-Rust?rev=bf956db99b69d41ee142c9d52054911af28d7e93#bf956db99b69d41ee142c9d52054911af28d7e93"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -339,7 +348,6 @@ dependencies = [
 [[package]]
 name = "flecs_ecs_sys"
 version = "0.2.1"
-source = "git+https://github.com/Indra-db/Flecs-Rust?rev=bf956db99b69d41ee142c9d52054911af28d7e93#bf956db99b69d41ee142c9d52054911af28d7e93"
 dependencies = [
  "bindgen",
  "cc",
@@ -563,6 +571,16 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
  "libm",
+]
+
+[[package]]
+name = "os_pipe"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
+dependencies = [
+ "libc",
+ "windows-sys",
 ]
 
 [[package]]
@@ -827,6 +845,15 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-sys"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+dependencies = [
+ "windows-link",
+]
 
 [[package]]
 name = "zerocopy"

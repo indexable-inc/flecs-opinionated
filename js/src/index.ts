@@ -1155,7 +1155,7 @@ export function checkHostChildren(records: HostRecord[]): void {
       if (a.length !== got.length || a.length !== b.length || a.some((x, k) => x !== b[k])) {
         throw new Error(`entity ${hex(r.id)}: its children are not exactly the entities whose parent it is, each once`);
       }
-    } else if (mine.some((j) => records[j].parent_component === true)) {
+    } else if (mine.some((j) => records[j]?.parent_component === true)) {
       throw new Error(`entity ${hex(r.id)}: a child of it is in Parent storage, but its record lists no child order`);
     }
   });

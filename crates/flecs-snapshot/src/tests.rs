@@ -152,9 +152,7 @@ fn s(v: &str) -> Ipld {
 /// C1: an unsigned enum's constants keep their values (they were all written as 0).
 #[test]
 fn unsigned_enum_constants() {
-    let w = world(
-        "using flecs.meta\nenum U(A: 1, B: 7, {underlying_type: u32})\ne { U: {B} }\n",
-    );
+    let w = world("using flecs.meta\nenum U(A: 1, B: 7, {underlying_type: u32})\ne { U: {B} }\n");
     let doc = w.document(&["e"]).unwrap();
     let l = field(field(field(&doc, "layouts"), "U"), "layout");
     let pair = |n: &str, v: i128| Ipld::List(vec![s(n), Ipld::Integer(v)]);
@@ -247,9 +245,13 @@ fn hash_names_do_not_collide_with_unnamed_children() {
 fn integer_literal_past_u64_is_refused() {
     let script = |lit: &str| format!("struct U(v: u64)\nx {{ U: {{{lit}}} }}\n");
     let mut w = World::new().unwrap();
-    let e = w.run("int.flecs", &script("99999999999999999999")).unwrap_err();
+    let e = w
+        .run("int.flecs", &script("99999999999999999999"))
+        .unwrap_err();
     assert!(e.contains("out of range"), "{e}");
-    let doc = world(&script("18446744073709551615")).document(&["x"]).unwrap();
+    let doc = world(&script("18446744073709551615"))
+        .document(&["x"])
+        .unwrap();
     let v = field(
         field(field(field(entity(&doc, "x"), "components"), "U"), "value"),
         "v",
@@ -531,9 +533,8 @@ fn compat_table() {
         let w = world(&format!("{BASE}{decl}\nt {{\n  T: {{{value}}}\n}}\n"));
         record(&w.document(&["t"]).unwrap(), "T").clone()
     };
-    let with = |ty: &str, annot: &str| {
-        format!("struct T(v: {ty})\nT {{\n  v {{\n{annot}\n  }}\n}}")
-    };
+    let with =
+        |ty: &str, annot: &str| format!("struct T(v: {ty})\nT {{\n  v {{\n{annot}\n  }}\n}}");
     let n = |ty: &str, annot: &str| (with(ty, annot), "v: 5".to_string());
     let cat = |names: &str| {
         (
@@ -577,10 +578,7 @@ fn compat_table() {
         (n("u32", ""), n("u64", ""), Compat::NeedsMigration),
         (
             n("u32", ""),
-            (
-                "struct T(v: u32, w: u32)".into(),
-                "v: 5, w: 1".into(),
-            ),
+            ("struct T(v: u32, w: u32)".into(), "v: 5, w: 1".into()),
             Compat::NeedsMigration,
         ),
         // Catalog: a name added is safe, one removed needs a migration, refers_to added needs a check.

@@ -123,7 +123,10 @@ pub type R<T> = Result<T, String>;
 
 /// The children Flecs keeps in order under `p` (OrderedChildren, or any child in `Parent` storage), both storages, in
 /// that order; None when Flecs keeps no order for `p`.
-pub(crate) fn ordered_children(w: *const ecs_world_t, p: ecs_entity_t) -> Option<Vec<ecs_entity_t>> {
+pub(crate) fn ordered_children(
+    w: *const ecs_world_t,
+    p: ecs_entity_t,
+) -> Option<Vec<ecs_entity_t>> {
     let mut buf = vec![0; 16];
     loop {
         // SAFETY: `buf` has room for its length.

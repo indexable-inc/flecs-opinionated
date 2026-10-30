@@ -100,12 +100,20 @@ fn atlas_sized_value_is_elided_not_fatal() {
     }
     let all = world_json(&w);
     assert_eq!(all.matches(&note).count(), 4, "{all}");
-    assert!(all.len() - empty < 16 * 1024, "{} bytes over {empty}", all.len() - empty);
+    assert!(
+        all.len() - empty < 16 * 1024,
+        "{} bytes over {empty}",
+        all.len() - empty
+    );
 
     // At the budget the list is still shown whole: the budget counts the newtype's one member and Texels's three.
     let at = ptr_json(&w, ty, &atlas(JSON_ELEMENTS - 4)).replace(' ', "");
     assert!(!at.contains("notshown"), "{}", &at[..200.min(at.len())]);
-    assert!(at.contains("[-1,-0.75,-0.5"), "{}", &at[..200.min(at.len())]);
+    assert!(
+        at.contains("[-1,-0.75,-0.5"),
+        "{}",
+        &at[..200.min(at.len())]
+    );
     let over = ptr_json(&w, ty, &atlas(JSON_ELEMENTS - 3));
     assert!(over.contains("not shown"), "{over}");
 }

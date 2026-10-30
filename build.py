@@ -93,7 +93,9 @@ async def build(test: bool) -> None:
     os.environ.setdefault("FLECS_NATIVE", str(target_dir() / "release" / f"libflecs_snapshot.{ext}"))
     async with asyncio.TaskGroup() as g:
         # Not --all-features: flecs-c's `host` links the application's Flecs, which host-check/ supplies.
-        features = "flecs-snapshot/ffi,flecs-describe/glam,flecs-describe/glamx,flecs-describe/half,flecs-describe/bitflags"
+        features = (
+            "flecs-snapshot/ffi,flecs-describe/glam,flecs-describe/glamx,flecs-describe/half,flecs-describe/bitflags"
+        )
         g.create_task(run("cargo test", ["cargo", "test", "--workspace", "--features", features], 900))
         # The native-only REST server, on its own: in the workspace run it would change the native worlds the
         # byte-identity tests compare with wasm (REST imports the pipeline, timer and REST modules into every world).

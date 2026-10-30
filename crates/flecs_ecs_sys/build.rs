@@ -301,7 +301,11 @@ fn main() {
     // lib.rs), and without the file's inner attributes, which the module
     // that includes them carries.
     if std::env::var("CARGO_CFG_TARGET_FAMILY").is_ok_and(|f| f == "wasm") {
-        let source = if release_c { "src/bindings_release.rs" } else { "src/bindings.rs" };
+        let source = if release_c {
+            "src/bindings_release.rs"
+        } else {
+            "src/bindings.rs"
+        };
         println!("cargo:rerun-if-changed={source}");
         let text = std::fs::read_to_string(source).expect("the checked-in bindings");
         let wasm: String = text
@@ -419,7 +423,9 @@ fn main() {
                     .into_iter()
                     .map(|t| format!("{sysroot}/{dir}/{t}"))
                     .find(|p| std::path::Path::new(p).is_dir())
-                    .unwrap_or_else(|| panic!("RGB_WASI_SYSROOT has no {dir}/wasm32-wasip1 or {dir}/wasm32-wasi"))
+                    .unwrap_or_else(|| {
+                        panic!("RGB_WASI_SYSROOT has no {dir}/wasm32-wasip1 or {dir}/wasm32-wasi")
+                    })
             };
             build
                 .flag("-nostdlibinc")

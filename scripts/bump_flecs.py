@@ -196,7 +196,7 @@ def finish_bindings(raw: str) -> str:
 async def bindings(bindgen: str, scratch: Path) -> None:
     header = SYS / "src" / "flecs_rust.h"
     outs = {True: SYS / "src" / "bindings.rs", False: SYS / "src" / "bindings_release.rs"}
-    scratch.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(scratch.mkdir, parents=True, exist_ok=True)
     tmp = {debug: scratch / out.name for debug, out in outs.items()}
     async with asyncio.TaskGroup() as g:
         for debug in outs:
@@ -252,7 +252,9 @@ async def copy_distr(flecs: Path, commit: str) -> Pin:
         base = g.create_task(text("find upstream base", git(flecs, "merge-base", commit, up)))
         c = g.create_task(run("read flecs.c", git(flecs, "show", f"{commit}:distr/flecs.c"), 120))
         h = g.create_task(run("read flecs.h", git(flecs, "show", f"{commit}:distr/flecs.h"), 120))
-        patches = g.create_task(text("list fork commits", git(flecs, "log", "--reverse", "--format=%h %s", f"{up}..{commit}")))
+        patches = g.create_task(
+            text("list fork commits", git(flecs, "log", "--reverse", "--format=%h %s", f"{up}..{commit}"))
+        )
     async with asyncio.TaskGroup() as g:
         meta = g.create_task(text("read upstream commit", git(flecs, "log", "-1", "--format=%cs%n%s", base.result())))
         ahead = g.create_task(text("count commits", git(flecs, "rev-list", "--count", f"{BASE_416}..{base.result()}")))

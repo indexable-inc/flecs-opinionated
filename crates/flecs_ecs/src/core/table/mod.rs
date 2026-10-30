@@ -398,7 +398,11 @@ pub trait TableOperations<'a>: IntoTable {
         // SAFETY: table_ptr_mut points to the live table backing this range.
         let entities = unsafe { sys::ecs_table_entities(table) };
         if entities.is_null() {
-            return TableEntities { slice: &[], world, table };
+            return TableEntities {
+                slice: &[],
+                world,
+                table,
+            };
         }
         // SAFETY: table_ptr_mut points to the live table backing this range.
         let table_count = unsafe { sys::ecs_table_count(table) }.max(0) as usize;
@@ -409,7 +413,11 @@ pub trait TableOperations<'a>: IntoTable {
         // guard is dropped.
         let slice =
             unsafe { core::slice::from_raw_parts((entities as *const Entity).add(offset), count) };
-        TableEntities { slice, world, table }
+        TableEntities {
+            slice,
+            world,
+            table,
+        }
     }
 
     fn clear_entities(&self) {
