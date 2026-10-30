@@ -337,6 +337,12 @@ impl Default for ecs_type_hooks_t {
             lifecycle_ctx: core::ptr::null_mut(),
             lifecycle_ctx_free: None,
             flags: Default::default(),
+            column_allocator: crate::ecs_column_allocator_t {
+                malloc_: None,
+                realloc_: None,
+                free_: None,
+                ctx: core::ptr::null_mut(),
+            },
         }
     }
 }

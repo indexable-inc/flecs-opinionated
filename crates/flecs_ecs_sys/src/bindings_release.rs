@@ -1549,6 +1549,14 @@ pub type ecs_os_api_fwrite_t = ::core::option::Option<
         file: *mut FILE,
     ) -> usize,
 >;
+#[doc = "OS API mkdir function type.\n Returns 0 if the directory was created or already exists."]
+pub type ecs_os_api_mkdir_t = ::core::option::Option<
+    unsafe extern "C-unwind" fn(path: *const ::core::ffi::c_char) -> ::core::ffi::c_int,
+>;
+#[doc = "OS API remove function type.\n Used to remove a file (remove_) or an empty directory (rmdir_). Returns 0 if\n the file or directory was removed."]
+pub type ecs_os_api_remove_t = ::core::option::Option<
+    unsafe extern "C-unwind" fn(path: *const ::core::ffi::c_char) -> ::core::ffi::c_int,
+>;
 #[doc = "OS API performance tracing function type.\n\n @param filename The source file name.\n @param line The source line number.\n @param name The name of the trace region."]
 pub type ecs_os_api_perf_trace_t = ::core::option::Option<
     unsafe extern "C-unwind" fn(
@@ -1639,6 +1647,12 @@ pub struct ecs_os_api_t {
     pub fread_: ecs_os_api_fread_t,
     #[doc = "< fwrite callback."]
     pub fwrite_: ecs_os_api_fwrite_t,
+    #[doc = "< mkdir callback."]
+    pub mkdir_: ecs_os_api_mkdir_t,
+    #[doc = "< rmdir callback."]
+    pub rmdir_: ecs_os_api_remove_t,
+    #[doc = "< remove callback."]
+    pub remove_: ecs_os_api_remove_t,
     #[doc = "< perf_trace_push callback."]
     pub perf_trace_push_: ecs_os_api_perf_trace_t,
     #[doc = "< perf_trace_pop callback."]
@@ -1790,6 +1804,10 @@ unsafe extern "C-unwind" {
     #[doc = "Are module path functions available?"]
     pub fn ecs_os_has_modules() -> bool;
 }
+unsafe extern "C-unwind" {
+    #[doc = "Are directory and file removal functions available?"]
+    pub fn ecs_os_has_dirs() -> bool;
+}
 #[doc = "Function prototype for runnables (systems, observers).\n The run callback overrides the default behavior for iterating through the\n results of a runnable object.\n\n The default runnable iterates the iterator, and calls an iter_action (see\n below) for each returned result.\n\n @param it The iterator to be iterated by the runnable."]
 pub type ecs_run_action_t =
     ::core::option::Option<unsafe extern "C-unwind" fn(it: *mut ecs_iter_t)>;
@@ -1919,6 +1937,32 @@ pub type ecs_on_validate_t = ::core::option::Option<
         entity: ecs_entity_t,
         ptr: *mut ::core::ffi::c_void,
     ) -> bool,
+>;
+#[doc = "Column allocator callback that allocates storage for a table column.\n\n @param size Size of the allocation in bytes.\n @param alignment Alignment of the component type.\n @param ctx User context from ecs_column_allocator_t::ctx.\n @return The allocated memory."]
+pub type ecs_column_malloc_t = ::core::option::Option<
+    unsafe extern "C-unwind" fn(
+        size: ecs_size_t,
+        alignment: ecs_size_t,
+        ctx: *mut ::core::ffi::c_void,
+    ) -> *mut ::core::ffi::c_void,
+>;
+#[doc = "Column allocator callback that resizes storage for a table column.\n The contents of the old storage up to the smallest of old_size and new_size\n must be preserved, like with realloc().\n\n @param ptr Storage previously returned by the allocator.\n @param old_size Current size of the allocation in bytes.\n @param new_size New size of the allocation in bytes.\n @param alignment Alignment of the component type.\n @param ctx User context from ecs_column_allocator_t::ctx.\n @return The (possibly moved) storage."]
+pub type ecs_column_realloc_t = ::core::option::Option<
+    unsafe extern "C-unwind" fn(
+        ptr: *mut ::core::ffi::c_void,
+        old_size: ecs_size_t,
+        new_size: ecs_size_t,
+        alignment: ecs_size_t,
+        ctx: *mut ::core::ffi::c_void,
+    ) -> *mut ::core::ffi::c_void,
+>;
+#[doc = "Column allocator callback that frees storage for a table column.\n\n @param ptr Storage previously returned by the allocator.\n @param size Size of the allocation in bytes.\n @param ctx User context from ecs_column_allocator_t::ctx."]
+pub type ecs_column_free_t = ::core::option::Option<
+    unsafe extern "C-unwind" fn(
+        ptr: *mut ::core::ffi::c_void,
+        size: ecs_size_t,
+        ctx: *mut ::core::ffi::c_void,
+    ),
 >;
 #[doc = "Destructor function for poly objects."]
 pub type flecs_poly_dtor_t =
@@ -2087,6 +2131,19 @@ pub struct ecs_observer_t {
     #[doc = "< Entity associated with the observer."]
     pub entity: ecs_entity_t,
 }
+#[doc = "Custom allocator for the table columns of a component.\n When set for a component (see ecs_type_hooks_t::column_allocator), all\n memory for table columns that store the component is allocated, resized and\n freed with these callbacks instead of the OS API. This makes it possible to\n store component data in memory with special properties, such as memory that\n is shared with a GPU.\n\n Column storage may move when a table grows, shrinks (ecs_shrink()) or is\n merged. Applications that cache column pointers should re-obtain them with\n ecs_table_get_column() or from an iterator, or track moves in the allocator\n callbacks.\n\n The allocator is only used for table storage. Components that are stored\n outside of tables (e.g. Sparse or DontFragment components) are allocated\n with the default allocator. The ctx must remain valid for as long as the\n world has tables with the component (until ecs_fini() returns).\n\n @ingroup components"]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ecs_column_allocator_t {
+    #[doc = "< Allocate column storage (required)."]
+    pub malloc_: ecs_column_malloc_t,
+    #[doc = "< Resize column storage (optional). If\n not set, malloc_, memcpy and free_ are\n used."]
+    pub realloc_: ecs_column_realloc_t,
+    #[doc = "< Free column storage (required)."]
+    pub free_: ecs_column_free_t,
+    #[doc = "< User context passed to callbacks."]
+    pub ctx: *mut ::core::ffi::c_void,
+}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct ecs_type_hooks_t {
@@ -2134,6 +2191,8 @@ pub struct ecs_type_hooks_t {
     pub binding_ctx_free: ecs_ctx_free_t,
     #[doc = "< Callback to free lifecycle_ctx."]
     pub lifecycle_ctx_free: ecs_ctx_free_t,
+    #[doc = "Custom allocator for table columns of the component (optional). Cannot\n be changed while the component is in use."]
+    pub column_allocator: ecs_column_allocator_t,
 }
 #[doc = "Type that contains component information (passed to ctors/dtors/...).\n\n @ingroup components"]
 #[repr(C)]
@@ -7503,13 +7562,22 @@ unsafe extern "C-unwind" {
 #[doc = "Result of running a command."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_result_t {
+pub struct ecs_shell_result_t {
     #[doc = "Value returned by the command. Empty when the command has no return\n value or failed. Commands that edit script code are the exception: when\n the edit was applied but reloading the script failed, the result is set\n together with the errors of the reload."]
     pub result: ecs_value_t,
     #[doc = "Errors logged while the command ran, one entry per error (vec<char*>)."]
     pub errors: ecs_vec_t,
 }
-#[doc = "Command session.\n A session stores the scope relative to which commands resolve identifiers,\n and a bounded history of the commands that ran in the session together with\n their results.\n\n The results are stored as JSON objects with the scope in which the command\n ran, and the type, result and errors of the command:\n\n @code\n {\"scope\":\"parent\", \"type\":\"flecs.meta.string\", \"result\":\"...\", \"errors\":\\[\\]}\n @endcode\n\n The type and result members are omitted when the command did not return a\n value. The results member is not reflected, as it can be large."]
+#[doc = "Resource created by a command, see ecs_shell_resource_create()."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ecs_shell_resource_t {
+    #[doc = "< Name of the resource, unique within the session."]
+    pub name: *mut ::core::ffi::c_char,
+    #[doc = "< Content type (for example \"image/png\")."]
+    pub content_type: *mut ::core::ffi::c_char,
+}
+#[doc = "Command session.\n A session stores the scope relative to which commands resolve identifiers,\n and a bounded history of the commands that ran in the session together with\n their results.\n\n The results are stored as JSON objects with the scope in which the command\n ran, and the type, result and errors of the command:\n\n @code\n {\"scope\":\"parent\", \"type\":\"flecs.meta.string\", \"result\":\"...\", \"errors\":\\[\\]}\n @endcode\n\n The type and result members are omitted when the command did not return a\n value. The results and resources members are not reflected."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct EcsCommandSession {
@@ -7521,11 +7589,22 @@ pub struct EcsCommandSession {
     pub history_size: i32,
     #[doc = "< JSON results of the commands in the history (vec<char*>)."]
     pub results: ecs_vec_t,
+    #[doc = "< Resources created by commands (vec<ecs_shell_resource_t>)."]
+    pub resources: ecs_vec_t,
+    #[doc = "< Directory with the resource files, NULL if no resources were created."]
+    pub resource_path: *mut ::core::ffi::c_char,
 }
-#[doc = "Used with ecs_command_session_init()."]
+#[doc = "Shell singleton."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_session_desc_t {
+pub struct EcsScriptShell {
+    #[doc = "< Scopes that contain commands, searched in order (vec<ecs_entity_t>)."]
+    pub command_paths: ecs_vec_t,
+}
+#[doc = "Used with ecs_shell_session_init()."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ecs_shell_session_desc_t {
     #[doc = "< Entity to use for the session (optional)."]
     pub entity: ecs_entity_t,
     #[doc = "< Initial scope (optional, default is root)."]
@@ -7536,7 +7615,7 @@ pub struct ecs_command_session_desc_t {
 #[doc = "Parameter of a command, returned by help."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_param_info_t {
+pub struct ecs_shell_param_info_t {
     #[doc = "< Parameter name."]
     pub name: *mut ::core::ffi::c_char,
     #[doc = "< Parameter type."]
@@ -7549,12 +7628,12 @@ pub struct ecs_command_param_info_t {
 #[doc = "Command, returned by help."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_info_t {
+pub struct ecs_shell_info_t {
     #[doc = "< Command name."]
     pub name: *mut ::core::ffi::c_char,
     #[doc = "< Command description."]
     pub brief: *mut ::core::ffi::c_char,
-    #[doc = "< Parameters (vec<ecs_command_param_info_t>)."]
+    #[doc = "< Parameters (vec<ecs_shell_param_info_t>)."]
     pub params: ecs_vec_t,
     #[doc = "< Return type, 0 if the command has no result."]
     pub return_type: ecs_entity_t,
@@ -7562,7 +7641,7 @@ pub struct ecs_command_info_t {
 #[doc = "Entity in a tree, returned by tree."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_tree_node_t {
+pub struct ecs_shell_tree_node_t {
     #[doc = "< The entity."]
     pub entity: ecs_entity_t,
     #[doc = "< Depth relative to the scope, 0 for children."]
@@ -7571,7 +7650,7 @@ pub struct ecs_command_tree_node_t {
 #[doc = "Component and value."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_component_value_t {
+pub struct ecs_shell_component_value_t {
     #[doc = "< Component id."]
     pub id: ecs_id_t,
     #[doc = "< Component value."]
@@ -7580,12 +7659,12 @@ pub struct ecs_command_component_value_t {
 #[doc = "Entity information, returned by cat."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_entity_info_t {
+pub struct ecs_shell_entity_info_t {
     #[doc = "< The entity."]
     pub entity: ecs_entity_t,
     #[doc = "< Numeric entity id."]
     pub id: u64,
-    #[doc = "< Components with values (vec<ecs_command_component_value_t>)."]
+    #[doc = "< Components with values (vec<ecs_shell_component_value_t>)."]
     pub components: ecs_vec_t,
     #[doc = "< Ids without values (vec<ecs_id_t>)."]
     pub ids: ecs_vec_t,
@@ -7593,7 +7672,7 @@ pub struct ecs_command_entity_info_t {
 #[doc = "Documentation, returned by man."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_doc_info_t {
+pub struct ecs_shell_doc_info_t {
     #[doc = "< The entity."]
     pub entity: ecs_entity_t,
     #[doc = "< Doc name."]
@@ -7610,16 +7689,16 @@ pub struct ecs_command_doc_info_t {
 #[doc = "Query result row, returned by query."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_query_row_t {
+pub struct ecs_shell_query_row_t {
     #[doc = "< Matched entity, 0 if the query has no $this."]
     pub entity: ecs_entity_t,
-    #[doc = "< Fields with a value (vec<ecs_command_component_value_t>)."]
+    #[doc = "< Fields with a value (vec<ecs_shell_component_value_t>)."]
     pub fields: ecs_vec_t,
 }
 #[doc = "Match returned by grep."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_grep_match_t {
+pub struct ecs_shell_grep_match_t {
     #[doc = "< Entity that matched."]
     pub entity: ecs_entity_t,
     #[doc = "< Component that matched, 0 for the name."]
@@ -7630,7 +7709,7 @@ pub struct ecs_command_grep_match_t {
 #[doc = "Script, returned by scripts."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_script_info_t {
+pub struct ecs_shell_script_info_t {
     #[doc = "< Script entity."]
     pub script: ecs_entity_t,
     #[doc = "< Filename, NULL if not loaded from a file."]
@@ -7645,7 +7724,7 @@ pub struct ecs_command_script_info_t {
 #[doc = "Line of script code."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_script_line_t {
+pub struct ecs_shell_script_line_t {
     #[doc = "< Line number (1 based)."]
     pub line: i32,
     #[doc = "< Text of the line."]
@@ -7654,7 +7733,7 @@ pub struct ecs_command_script_line_t {
 #[doc = "Match returned by script_grep."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_script_match_t {
+pub struct ecs_shell_script_match_t {
     #[doc = "< Script entity."]
     pub script: ecs_entity_t,
     #[doc = "< Line number (1 based)."]
@@ -7665,7 +7744,7 @@ pub struct ecs_command_script_match_t {
 #[doc = "Location of an entity statement, returned by script_where."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_script_location_t {
+pub struct ecs_shell_script_location_t {
     #[doc = "< Script that declares the entity."]
     pub script: ecs_entity_t,
     #[doc = "< Line of the statement (1 based)."]
@@ -7680,42 +7759,71 @@ pub struct ecs_command_script_location_t {
 #[doc = "Script error, returned by script_errors."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct ecs_command_script_error_t {
+pub struct ecs_shell_script_error_t {
     #[doc = "< Script entity."]
     pub script: ecs_entity_t,
     #[doc = "< Error message."]
     pub error: *mut ::core::ffi::c_char,
 }
 unsafe extern "C" {
+    #[doc = "Shell component."]
+    pub static mut FLECS_IDEcsScriptShellID_: ecs_entity_t;
+}
+unsafe extern "C" {
     #[doc = "Session component."]
     pub static mut FLECS_IDEcsCommandSessionID_: ecs_entity_t;
 }
+unsafe extern "C" {
+    #[doc = "Resource type (flecs.script.shell.resource)."]
+    pub static mut FLECS_IDecs_shell_resource_tID_: ecs_entity_t;
+}
 unsafe extern "C-unwind" {
-    #[doc = "Create a command session.\n When no entity is provided, the session is created in the\n script.command.sessions scope.\n\n @param world The world.\n @param desc Session parameters (optional).\n @return The session entity, 0 if failed."]
-    pub fn ecs_command_session_init(
+    #[doc = "Create a command session.\n When no entity is provided, the session is created in the\n script.shell.sessions scope.\n\n @param world The world.\n @param desc Session parameters (optional).\n @return The session entity, 0 if failed."]
+    pub fn ecs_shell_session_init(
         world: *mut ecs_world_t,
-        desc: *const ecs_command_session_desc_t,
+        desc: *const ecs_shell_session_desc_t,
     ) -> ecs_entity_t;
 }
 unsafe extern "C-unwind" {
-    #[doc = "Run a command.\n Parses the command line, runs the command and returns its result and the\n errors that were logged while it ran. The command and a JSON snapshot of its\n result are added to the history of the session. The result must be freed with ecs_command_result_fini().\n\n @param world The world.\n @param session The session.\n @param cmd The command line.\n @return The result of the command."]
-    pub fn ecs_command_run(
+    #[doc = "Run a command.\n Parses the command line, runs the command and returns its result and the\n errors that were logged while it ran. The command and a JSON snapshot of its\n result are added to the history of the session. The result must be freed with ecs_shell_result_fini().\n\n @param world The world.\n @param session The session.\n @param cmd The command line.\n @return The result of the command."]
+    pub fn ecs_shell_run(
         world: *mut ecs_world_t,
         session: ecs_entity_t,
         cmd: *const ::core::ffi::c_char,
-    ) -> ecs_command_result_t;
+    ) -> ecs_shell_result_t;
 }
 unsafe extern "C-unwind" {
     #[doc = "Free the resources of a command result.\n\n @param world The world.\n @param result The result."]
-    pub fn ecs_command_result_fini(world: *mut ecs_world_t, result: *mut ecs_command_result_t);
+    pub fn ecs_shell_result_fini(world: *mut ecs_world_t, result: *mut ecs_shell_result_t);
 }
 unsafe extern "C-unwind" {
-    #[doc = "Get the session of the running command.\n Commands use this to access the session that they run in.\n\n @param world The world.\n @return The session, or 0 when called outside of ecs_command_run()."]
-    pub fn ecs_command_get_session(world: *const ecs_world_t) -> ecs_entity_t;
+    #[doc = "Get the session of the running command.\n Commands use this to access the session that they run in.\n\n @param world The world.\n @return The session, or 0 when called outside of ecs_shell_run()."]
+    pub fn ecs_shell_get_session(world: *const ecs_world_t) -> ecs_entity_t;
 }
 unsafe extern "C-unwind" {
-    #[doc = "Script command import function.\n Usage:\n @code\n ECS_IMPORT(world, FlecsScriptCommand)\n @endcode\n\n @param world The world."]
-    pub fn FlecsScriptCommandImport(world: *mut ecs_world_t);
+    #[doc = "Create a resource in a session.\n Writes the data to a new file in the resource directory of the session, and\n adds the resource to the session. The resource directory is created when the\n first resource is created. Files are written with the OS API.\n\n A command that returns a resource typically does:\n\n @code\n ecs_shell_resource_create(ctx->world, ecs_shell_get_session(ctx->world),\n     \"image/png\", data, size, result->ptr);\n @endcode\n\n @param world The world.\n @param session The session.\n @param content_type The content type of the data (optional).\n @param data The data to store.\n @param size The size of the data.\n @param resource Out parameter for the created resource (optional). The\n        members must be freed by the caller.\n @return Zero if success, non-zero if failed."]
+    pub fn ecs_shell_resource_create(
+        world: *mut ecs_world_t,
+        session: ecs_entity_t,
+        content_type: *const ::core::ffi::c_char,
+        data: *const ::core::ffi::c_void,
+        size: ecs_size_t,
+        resource: *mut ecs_shell_resource_t,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C-unwind" {
+    #[doc = "Read a resource of a session.\n Only resources that were created in the session can be read.\n\n @param world The world.\n @param session The session.\n @param name The name of the resource.\n @param size Out parameter for the size of the data.\n @param content_type Out parameter for the content type (optional). The\n        string is owned by the session.\n @return The data, NULL if the resource does not exist or could not be read.\n         The data must be freed with ecs_os_free()."]
+    pub fn ecs_shell_resource_read(
+        world: *const ecs_world_t,
+        session: ecs_entity_t,
+        name: *const ::core::ffi::c_char,
+        size: *mut ecs_size_t,
+        content_type: *mut *const ::core::ffi::c_char,
+    ) -> *mut ::core::ffi::c_void;
+}
+unsafe extern "C-unwind" {
+    #[doc = "Script shell import function.\n Usage:\n @code\n ECS_IMPORT(world, FlecsScriptShell)\n @endcode\n\n @param world The world."]
+    pub fn FlecsScriptShellImport(world: *mut ecs_world_t);
 }
 unsafe extern "C" {
     pub static mut FLECS_IDEcsScriptID_: ecs_entity_t;
@@ -10089,7 +10197,10 @@ unsafe extern "C-unwind" {
 }
 unsafe extern "C-unwind" {
     #[doc = "ecs_record_find() of Flecs 4.1.6, which upstream master removed (its replacement flecs_entities_get asserts that the\n entity is alive and takes no stage): the entity's record, or NULL when the entity is not alive. Accepts a\n stage."]
-    pub fn ecs_rust_record_find(world: *const ecs_world_t, entity: ecs_entity_t) -> *mut ecs_record_t;
+    pub fn ecs_rust_record_find(
+        world: *const ecs_world_t,
+        entity: ecs_entity_t,
+    ) -> *mut ecs_record_t;
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

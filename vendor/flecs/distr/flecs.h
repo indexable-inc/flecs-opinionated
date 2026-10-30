@@ -3778,6 +3778,21 @@ size_t (*ecs_os_api_fwrite_t)(
     size_t count,
     FILE *file);
 
+/** OS API mkdir function type.
+ * Returns 0 if the directory was created or already exists.
+ */
+typedef
+int (*ecs_os_api_mkdir_t)(
+    const char *path);
+
+/** OS API remove function type.
+ * Used to remove a file (remove_) or an empty directory (rmdir_). Returns 0 if
+ * the file or directory was removed.
+ */
+typedef
+int (*ecs_os_api_remove_t)(
+    const char *path);
+
 /** OS API performance tracing function type.
  *
  * @param filename The source file name.
@@ -3870,6 +3885,9 @@ typedef struct ecs_os_api_t {
     ecs_os_api_fclose_t fclose_;                   /**< fclose callback. */
     ecs_os_api_fread_t fread_;                     /**< fread callback. */
     ecs_os_api_fwrite_t fwrite_;                   /**< fwrite callback. */
+    ecs_os_api_mkdir_t mkdir_;                     /**< mkdir callback. */
+    ecs_os_api_remove_t rmdir_;                    /**< rmdir callback. */
+    ecs_os_api_remove_t remove_;                   /**< remove callback. */
 
     /* Performance tracing */
     ecs_os_api_perf_trace_t perf_trace_push_; /**< perf_trace_push callback. */
@@ -4028,6 +4046,9 @@ void ecs_os_set_api_defaults(void);
 #define ecs_os_fclose(file) ecs_os_api.fclose_(file)
 #define ecs_os_fread(ptr, size, count, file) ecs_os_api.fread_(ptr, size, count, file)
 #define ecs_os_fwrite(ptr, size, count, file) ecs_os_api.fwrite_(ptr, size, count, file)
+#define ecs_os_mkdir(path) ecs_os_api.mkdir_(path)
+#define ecs_os_rmdir(path) ecs_os_api.rmdir_(path)
+#define ecs_os_remove(path) ecs_os_api.remove_(path)
 
 /* Threads */
 #define ecs_os_thread_new(callback, param) ecs_os_api.thread_new_(callback, param)
@@ -4310,6 +4331,10 @@ bool ecs_os_has_dl(void);
 FLECS_API
 bool ecs_os_has_modules(void);
 
+/** Are directory and file removal functions available? */
+FLECS_API
+bool ecs_os_has_dirs(void);
+
 #ifdef __cplusplus
 }
 #endif
@@ -4474,6 +4499,47 @@ typedef bool (*ecs_on_validate_t)(
     ecs_world_t *world,
     ecs_entity_t entity,
     void *ptr);
+
+/** Column allocator callback that allocates storage for a table column.
+ *
+ * @param size Size of the allocation in bytes.
+ * @param alignment Alignment of the component type.
+ * @param ctx User context from ecs_column_allocator_t::ctx.
+ * @return The allocated memory.
+ */
+typedef void* (*ecs_column_malloc_t)(
+    ecs_size_t size,
+    ecs_size_t alignment,
+    void *ctx);
+
+/** Column allocator callback that resizes storage for a table column.
+ * The contents of the old storage up to the smallest of old_size and new_size
+ * must be preserved, like with realloc().
+ *
+ * @param ptr Storage previously returned by the allocator.
+ * @param old_size Current size of the allocation in bytes.
+ * @param new_size New size of the allocation in bytes.
+ * @param alignment Alignment of the component type.
+ * @param ctx User context from ecs_column_allocator_t::ctx.
+ * @return The (possibly moved) storage.
+ */
+typedef void* (*ecs_column_realloc_t)(
+    void *ptr,
+    ecs_size_t old_size,
+    ecs_size_t new_size,
+    ecs_size_t alignment,
+    void *ctx);
+
+/** Column allocator callback that frees storage for a table column.
+ *
+ * @param ptr Storage previously returned by the allocator.
+ * @param size Size of the allocation in bytes.
+ * @param ctx User context from ecs_column_allocator_t::ctx.
+ */
+typedef void (*ecs_column_free_t)(
+    void *ptr,
+    ecs_size_t size,
+    void *ctx);
 
 /** Destructor function for poly objects. */
 typedef void (*flecs_poly_dtor_t)(
@@ -4739,6 +4805,35 @@ struct ecs_observer_t {
     ECS_TYPE_HOOK_MOVE_CTOR_ILLEGAL|ECS_TYPE_HOOK_CTOR_MOVE_DTOR_ILLEGAL|\
     ECS_TYPE_HOOK_MOVE_DTOR_ILLEGAL|ECS_TYPE_HOOK_CMP_ILLEGAL|\
     ECS_TYPE_HOOK_EQUALS_ILLEGAL)
+
+/** Custom allocator for the table columns of a component.
+ * When set for a component (see ecs_type_hooks_t::column_allocator), all
+ * memory for table columns that store the component is allocated, resized and
+ * freed with these callbacks instead of the OS API. This makes it possible to
+ * store component data in memory with special properties, such as memory that
+ * is shared with a GPU.
+ *
+ * Column storage may move when a table grows, shrinks (ecs_shrink()) or is
+ * merged. Applications that cache column pointers should re-obtain them with
+ * ecs_table_get_column() or from an iterator, or track moves in the allocator
+ * callbacks.
+ *
+ * The allocator is only used for table storage. Components that are stored
+ * outside of tables (e.g. Sparse or DontFragment components) are allocated
+ * with the default allocator. The ctx must remain valid for as long as the
+ * world has tables with the component (until ecs_fini() returns).
+ *
+ * @ingroup components
+ */
+typedef struct ecs_column_allocator_t {
+    ecs_column_malloc_t malloc_;       /**< Allocate column storage (required). */
+    ecs_column_realloc_t realloc_;     /**< Resize column storage (optional). If
+                                        * not set, malloc_, memcpy and free_ are
+                                        * used. */
+    ecs_column_free_t free_;           /**< Free column storage (required). */
+    void *ctx;                         /**< User context passed to callbacks. */
+} ecs_column_allocator_t;
+
 struct ecs_type_hooks_t {
     ecs_xtor_t ctor;            /**< ctor. */
     ecs_xtor_t dtor;            /**< dtor. */
@@ -4807,6 +4902,10 @@ struct ecs_type_hooks_t {
     ecs_ctx_free_t ctx_free;           /**< Callback to free ctx. */
     ecs_ctx_free_t binding_ctx_free;   /**< Callback to free binding_ctx. */
     ecs_ctx_free_t lifecycle_ctx_free; /**< Callback to free lifecycle_ctx. */
+
+    /** Custom allocator for table columns of the component (optional). Cannot
+     * be changed while the component is in use. */
+    ecs_column_allocator_t column_allocator;
 };
 
 /** Type that contains component information (passed to ctors/dtors/...).
@@ -16979,10 +17078,21 @@ void FlecsScriptInputImport(
  * @ingroup c_addons
  * Command line interface for interacting with a world.
  *
- * Commands are script functions in the flecs.script.command scope. Each
- * command has typed parameters and a typed return value. A command line is
- * parsed into a command name and arguments, where arguments are separated by
- * whitespace:
+ * Commands are script functions. The command_paths member of the
+ * EcsScriptShell singleton lists the scopes that contain commands. When
+ * running a command, the scopes are searched in order and the first function
+ * with a matching name is used. The builtin commands are stored in:
+ *
+ * - flecs.script.shell.commands.core
+ * - flecs.script.shell.commands.input
+ * - flecs.script.shell.commands.script
+ *
+ * Applications can add commands by appending their own scopes to
+ * command_paths.
+ *
+ * Each command has typed parameters and a typed return value. A command line
+ * is parsed into a command name and arguments, where arguments are separated
+ * by whitespace:
  *
  * - A token that starts with `"` ends at the next unescaped `"`. The quotes are
  *   removed and escape sequences (`\n`, `\t`, ...) are processed.
@@ -16998,6 +17108,19 @@ void FlecsScriptInputImport(
  *
  * Commands with optional parameters can be called with fewer arguments. Use
  * the help command to list the commands and their parameters.
+ *
+ * Commands can store files, like images, as resources of the session with
+ * ecs_shell_resource_create(). A command signals that it returned a resource
+ * by returning the flecs.script.shell.resource type (ecs_shell_resource_t).
+ * Clients can then fetch the content of the resource with the REST API:
+ *
+ * @code
+ * GET /shell/session/<session>/resource/<name>
+ * @endcode
+ *
+ * Resources are stored in CWD/.flecs/shell/<session>/<name>. The directory is
+ * created when the first resource of a session is created, and is deleted
+ * together with the session.
  * @{
  */
 
@@ -17014,7 +17137,7 @@ extern "C" {
 #endif
 
 /** Result of running a command. */
-typedef struct ecs_command_result_t {
+typedef struct ecs_shell_result_t {
     /** Value returned by the command. Empty when the command has no return
      * value or failed. Commands that edit script code are the exception: when
      * the edit was applied but reloading the script failed, the result is set
@@ -17023,7 +17146,13 @@ typedef struct ecs_command_result_t {
 
     /** Errors logged while the command ran, one entry per error (vec<char*>). */
     ecs_vec_t errors;
-} ecs_command_result_t;
+} ecs_shell_result_t;
+
+/** Resource created by a command, see ecs_shell_resource_create(). */
+typedef struct ecs_shell_resource_t {
+    char *name;              /**< Name of the resource, unique within the session. */
+    char *content_type;      /**< Content type (for example "image/png"). */
+} ecs_shell_resource_t;
 
 /** Command session.
  * A session stores the scope relative to which commands resolve identifiers,
@@ -17038,147 +17167,162 @@ typedef struct ecs_command_result_t {
  * @endcode
  *
  * The type and result members are omitted when the command did not return a
- * value. The results member is not reflected, as it can be large.
+ * value. The results and resources members are not reflected.
  */
 typedef struct EcsCommandSession {
     ecs_entity_t scope;      /**< Current scope, 0 for the root. */
     ecs_vec_t history;       /**< Commands that ran, oldest first (vec<char*>). */
     int32_t history_size;    /**< Maximum number of commands in the history. */
     ecs_vec_t results;       /**< JSON results of the commands in the history (vec<char*>). */
+    ecs_vec_t resources;     /**< Resources created by commands (vec<ecs_shell_resource_t>). */
+    char *resource_path;     /**< Directory with the resource files, NULL if no resources were created. */
 } EcsCommandSession;
 
-/** Used with ecs_command_session_init(). */
-typedef struct ecs_command_session_desc_t {
+/** Shell singleton. */
+typedef struct EcsScriptShell {
+    ecs_vec_t command_paths; /**< Scopes that contain commands, searched in order (vec<ecs_entity_t>). */
+} EcsScriptShell;
+
+/** Used with ecs_shell_session_init(). */
+typedef struct ecs_shell_session_desc_t {
     ecs_entity_t entity;     /**< Entity to use for the session (optional). */
     ecs_entity_t scope;      /**< Initial scope (optional, default is root). */
     int32_t history_size;    /**< History size (optional, default is FLECS_SCRIPT_SHELL_HISTORY_SIZE). */
-} ecs_command_session_desc_t;
+} ecs_shell_session_desc_t;
 
 /** Parameter of a command, returned by help. */
-typedef struct ecs_command_param_info_t {
+typedef struct ecs_shell_param_info_t {
     char *name;              /**< Parameter name. */
     ecs_entity_t type;       /**< Parameter type. */
     bool optional;           /**< Whether the parameter is optional. */
     char *brief;             /**< Parameter description. */
-} ecs_command_param_info_t;
+} ecs_shell_param_info_t;
 
 /** Command, returned by help. */
-typedef struct ecs_command_info_t {
+typedef struct ecs_shell_info_t {
     char *name;              /**< Command name. */
     char *brief;             /**< Command description. */
-    ecs_vec_t params;        /**< Parameters (vec<ecs_command_param_info_t>). */
+    ecs_vec_t params;        /**< Parameters (vec<ecs_shell_param_info_t>). */
     ecs_entity_t return_type; /**< Return type, 0 if the command has no result. */
-} ecs_command_info_t;
+} ecs_shell_info_t;
 
 /** Entity in a tree, returned by tree. */
-typedef struct ecs_command_tree_node_t {
+typedef struct ecs_shell_tree_node_t {
     ecs_entity_t entity;     /**< The entity. */
     int32_t depth;           /**< Depth relative to the scope, 0 for children. */
-} ecs_command_tree_node_t;
+} ecs_shell_tree_node_t;
 
 /** Component and value. */
-typedef struct ecs_command_component_value_t {
+typedef struct ecs_shell_component_value_t {
     ecs_id_t id;             /**< Component id. */
     ecs_value_t value;       /**< Component value. */
-} ecs_command_component_value_t;
+} ecs_shell_component_value_t;
 
 /** Entity information, returned by cat. */
-typedef struct ecs_command_entity_info_t {
+typedef struct ecs_shell_entity_info_t {
     ecs_entity_t entity;     /**< The entity. */
     uint64_t id;             /**< Numeric entity id. */
-    ecs_vec_t components;    /**< Components with values (vec<ecs_command_component_value_t>). */
+    ecs_vec_t components;    /**< Components with values (vec<ecs_shell_component_value_t>). */
     ecs_vec_t ids;           /**< Ids without values (vec<ecs_id_t>). */
-} ecs_command_entity_info_t;
+} ecs_shell_entity_info_t;
 
 /** Documentation, returned by man. */
-typedef struct ecs_command_doc_info_t {
+typedef struct ecs_shell_doc_info_t {
     ecs_entity_t entity;     /**< The entity. */
     char *name;              /**< Doc name. */
     char *brief;             /**< Brief description. */
     char *detail;            /**< Detailed description. */
     char *link;              /**< Link to external documentation. */
     char *color;             /**< Color. */
-} ecs_command_doc_info_t;
+} ecs_shell_doc_info_t;
 
 /** Query result row, returned by query. */
-typedef struct ecs_command_query_row_t {
+typedef struct ecs_shell_query_row_t {
     ecs_entity_t entity;     /**< Matched entity, 0 if the query has no $this. */
-    ecs_vec_t fields;        /**< Fields with a value (vec<ecs_command_component_value_t>). */
-} ecs_command_query_row_t;
+    ecs_vec_t fields;        /**< Fields with a value (vec<ecs_shell_component_value_t>). */
+} ecs_shell_query_row_t;
 
 /** Match returned by grep. */
-typedef struct ecs_command_grep_match_t {
+typedef struct ecs_shell_grep_match_t {
     ecs_entity_t entity;     /**< Entity that matched. */
     ecs_id_t id;             /**< Component that matched, 0 for the name. */
     char *text;              /**< Text that matched (name, id or value). */
-} ecs_command_grep_match_t;
+} ecs_shell_grep_match_t;
 
 /** Script, returned by scripts. */
-typedef struct ecs_command_script_info_t {
+typedef struct ecs_shell_script_info_t {
     ecs_entity_t script;     /**< Script entity. */
     char *filename;          /**< Filename, NULL if not loaded from a file. */
     int32_t lines;           /**< Number of lines. */
     bool unsaved;            /**< Whether the code differs from the saved code. */
     char *error;             /**< Error of last evaluation, NULL if none. */
-} ecs_command_script_info_t;
+} ecs_shell_script_info_t;
 
 /** Line of script code. */
-typedef struct ecs_command_script_line_t {
+typedef struct ecs_shell_script_line_t {
     int32_t line;            /**< Line number (1 based). */
     char *text;              /**< Text of the line. */
-} ecs_command_script_line_t;
+} ecs_shell_script_line_t;
 
 /** Match returned by script_grep. */
-typedef struct ecs_command_script_match_t {
+typedef struct ecs_shell_script_match_t {
     ecs_entity_t script;     /**< Script entity. */
     int32_t line;            /**< Line number (1 based). */
     char *text;              /**< Text of the line. */
-} ecs_command_script_match_t;
+} ecs_shell_script_match_t;
 
 /** Location of an entity statement, returned by script_where. */
-typedef struct ecs_command_script_location_t {
+typedef struct ecs_shell_script_location_t {
     ecs_entity_t script;     /**< Script that declares the entity. */
     int32_t line;            /**< Line of the statement (1 based). */
     int32_t column;          /**< Column of the statement (1 based). */
     ecs_entity_t template_;  /**< Template that declares the statement, if any. */
     char *statement;         /**< First line of the statement. */
-} ecs_command_script_location_t;
+} ecs_shell_script_location_t;
 
 /** Script error, returned by script_errors. */
-typedef struct ecs_command_script_error_t {
+typedef struct ecs_shell_script_error_t {
     ecs_entity_t script;     /**< Script entity. */
     char *error;             /**< Error message. */
-} ecs_command_script_error_t;
+} ecs_shell_script_error_t;
 
 #ifdef FLECS_SCRIPT_INPUT
 /** Pointer state, returned by pointer. */
-typedef struct ecs_command_pointer_state_t {
+typedef struct ecs_shell_pointer_state_t {
     EcsScriptMouseEvent event; /**< Last mouse event. */
     ecs_entity_t pressed;    /**< Entity pressed by held buttons, 0 if none. */
-} ecs_command_pointer_state_t;
+} ecs_shell_pointer_state_t;
 #endif
+
+/** Shell component. */
+FLECS_API
+extern ECS_COMPONENT_DECLARE(EcsScriptShell);
 
 /** Session component. */
 FLECS_API
 extern ECS_COMPONENT_DECLARE(EcsCommandSession);
 
+/** Resource type (flecs.script.shell.resource). */
+FLECS_API
+extern ECS_COMPONENT_DECLARE(ecs_shell_resource_t);
+
 /** Create a command session.
  * When no entity is provided, the session is created in the
- * script.command.sessions scope.
+ * script.shell.sessions scope.
  *
  * @param world The world.
  * @param desc Session parameters (optional).
  * @return The session entity, 0 if failed.
  */
 FLECS_API
-ecs_entity_t ecs_command_session_init(
+ecs_entity_t ecs_shell_session_init(
     ecs_world_t *world,
-    const ecs_command_session_desc_t *desc);
+    const ecs_shell_session_desc_t *desc);
 
 /** Run a command.
  * Parses the command line, runs the command and returns its result and the
  * errors that were logged while it ran. The command and a JSON snapshot of its
- * result are added to the history of the session. The result must be freed with ecs_command_result_fini().
+ * result are added to the history of the session. The result must be freed with ecs_shell_result_fini().
  *
  * @param world The world.
  * @param session The session.
@@ -17186,7 +17330,7 @@ ecs_entity_t ecs_command_session_init(
  * @return The result of the command.
  */
 FLECS_API
-ecs_command_result_t ecs_command_run(
+ecs_shell_result_t ecs_shell_run(
     ecs_world_t *world,
     ecs_entity_t session,
     const char *cmd);
@@ -17197,30 +17341,80 @@ ecs_command_result_t ecs_command_run(
  * @param result The result.
  */
 FLECS_API
-void ecs_command_result_fini(
+void ecs_shell_result_fini(
     ecs_world_t *world,
-    ecs_command_result_t *result);
+    ecs_shell_result_t *result);
 
 /** Get the session of the running command.
  * Commands use this to access the session that they run in.
  *
  * @param world The world.
- * @return The session, or 0 when called outside of ecs_command_run().
+ * @return The session, or 0 when called outside of ecs_shell_run().
  */
 FLECS_API
-ecs_entity_t ecs_command_get_session(
+ecs_entity_t ecs_shell_get_session(
     const ecs_world_t *world);
 
-/** Script command import function.
+/** Create a resource in a session.
+ * Writes the data to a new file in the resource directory of the session, and
+ * adds the resource to the session. The resource directory is created when the
+ * first resource is created. Files are written with the OS API.
+ *
+ * A command that returns a resource typically does:
+ *
+ * @code
+ * ecs_shell_resource_create(ctx->world, ecs_shell_get_session(ctx->world),
+ *     "image/png", data, size, result->ptr);
+ * @endcode
+ *
+ * @param world The world.
+ * @param session The session.
+ * @param content_type The content type of the data (optional).
+ * @param data The data to store.
+ * @param size The size of the data.
+ * @param resource Out parameter for the created resource (optional). The
+ *        members must be freed by the caller.
+ * @return Zero if success, non-zero if failed.
+ */
+FLECS_API
+int ecs_shell_resource_create(
+    ecs_world_t *world,
+    ecs_entity_t session,
+    const char *content_type,
+    const void *data,
+    ecs_size_t size,
+    ecs_shell_resource_t *resource);
+
+/** Read a resource of a session.
+ * Only resources that were created in the session can be read.
+ *
+ * @param world The world.
+ * @param session The session.
+ * @param name The name of the resource.
+ * @param size Out parameter for the size of the data.
+ * @param content_type Out parameter for the content type (optional). The
+ *        string is owned by the session.
+ * @return The data, NULL if the resource does not exist or could not be read.
+ *         The data must be freed with ecs_os_free().
+ */
+FLECS_API
+void* ecs_shell_resource_read(
+    const ecs_world_t *world,
+    ecs_entity_t session,
+    const char *name,
+    ecs_size_t *size,
+    const char **content_type);
+
+/** Script shell import function.
  * Usage:
  * @code
- * ECS_IMPORT(world, FlecsScriptCommand)
+ * ECS_IMPORT(world, FlecsScriptShell)
  * @endcode
  *
  * @param world The world.
  */
 FLECS_API
-void FlecsScriptCommandImport(
+void FlecsScriptShellImport(
     ecs_world_t *world);
 
 #ifdef __cplusplus

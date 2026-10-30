@@ -7,17 +7,25 @@ commits of our open upstream PRs, rebased onto it. Each PR also has its own bran
 from. There are no local changes here: a Flecs fix is an upstream PR, and rides on the fork's `master` until it merges.
 
 <!-- pin: written by scripts/bump_flecs.py -->
-- Fork commit (`master` of indexable-inc/flecs): [indexable-inc/flecs@c73ce7115](https://github.com/indexable-inc/flecs/commit/c73ce711543698c09d7883db3d0bbb9d3aa5836e) (`c73ce711543698c09d7883db3d0bbb9d3aa5836e`).
-- Upstream base (`master` of SanderMertens/flecs): [SanderMertens/flecs@c73ce7115](https://github.com/SanderMertens/flecs/commit/c73ce711543698c09d7883db3d0bbb9d3aa5836e) (`c73ce711543698c09d7883db3d0bbb9d3aa5836e`, "[script] Support relative paths in script shell commands", 2026-10-29),
-  659 commits past `6e4cd338a`, which 4.1.6 shipped as.
-- Fork commits on top: none; the fork commit is the upstream commit.
+- Fork commit (`master` of indexable-inc/flecs): [indexable-inc/flecs@cbaf7aa75](https://github.com/indexable-inc/flecs/commit/cbaf7aa750025717c6ec3082cb5ffd24acd99391) (`cbaf7aa750025717c6ec3082cb5ffd24acd99391`).
+- Upstream base (`master` of SanderMertens/flecs): [SanderMertens/flecs@37a7ef90d](https://github.com/SanderMertens/flecs/commit/37a7ef90dcf0e09a8971c4b162fc89c8718846a7) (`37a7ef90dcf0e09a8971c4b162fc89c8718846a7`, "[script] Shell navigation, resources, manual improvements", 2026-10-29),
+  660 commits past `6e4cd338a`, which 4.1.6 shipped as.
+- Fork commits on top (open upstream PRs, listed with links below):
+  - `b498217a5 Add per-component column allocator to type hooks`
+  - `cbaf7aa75 [json] Serialize floats with the shortest representation that round-trips`
 <!-- /pin -->
 
 `FLECS_VERSION_*` still says 4.1.6.
 
 ## Open upstream PRs
 
-None. Each open PR is listed here with its link, its fork branch and why this repository needs it, and is removed
+- [#2357](https://github.com/SanderMertens/flecs/pull/2357) (branch `column-allocator`) Per-component column
+  allocator in `ecs_type_hooks_t`: GPU-visible components live in a shared Metal heap (the game's plan/render.md).
+- [#2358](https://github.com/SanderMertens/flecs/pull/2358) (branch `json-exact-floats`) JSON writes floats as the
+  shortest form that reads back to the same value (was 10 decimals, small values became 0, `60000` became `"6e4"`),
+  and reads `e+`: saves of reflected components as Flecs JSON must round-trip bits.
+
+Each open PR is listed here with its link, its fork branch and why this repository needs it, and is removed
 when it merges (the bump's rebase then drops its commit).
 
 Merged, which this repository relies on:

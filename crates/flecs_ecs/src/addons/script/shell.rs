@@ -24,28 +24,28 @@ impl CommandResult {
 }
 
 impl World {
-    /// Create a command session (`ecs_command_session_init`).
+    /// Create a command session (`ecs_shell_session_init`).
     ///
     /// Commands run in the session resolve identifiers relative to `scope` (0 for the root), and the session keeps
     /// the last `history_size` commands with their results (0 for Flecs's default).
     pub fn command_session(&self, scope: impl IntoEntity, history_size: i32) -> EntityView<'_> {
-        let desc = sys::ecs_command_session_desc_t {
+        let desc = sys::ecs_shell_session_desc_t {
             entity: 0,
             scope: *scope.into_entity(self),
             history_size,
         };
         // SAFETY: the world is live; desc is fully initialised.
-        let session = unsafe { sys::ecs_command_session_init(self.ptr_mut(), &desc) };
+        let session = unsafe { sys::ecs_shell_session_init(self.ptr_mut(), &desc) };
         EntityView::new_from(self, session)
     }
 
-    /// Run one shell command line in `session` (`ecs_command_run`).
+    /// Run one shell command line in `session` (`ecs_shell_run`).
     pub fn command_run(&self, session: impl IntoEntity, cmd: &str) -> CommandResult {
         let world = self.ptr_mut();
         let cmd = compact_str::format_compact!("{}\0", cmd);
         // SAFETY: the world is live; cmd is NUL-terminated and outlives the call.
         let mut res = unsafe {
-            sys::ecs_command_run(world, *session.into_entity(self), cmd.as_ptr() as *const _)
+            sys::ecs_shell_run(world, *session.into_entity(self), cmd.as_ptr() as *const _)
         };
 
         let value = if res.result.type_ != 0 && !res.result.ptr.is_null() {
@@ -86,8 +86,8 @@ impl World {
             }
         }
 
-        // SAFETY: frees what ecs_command_run allocated in `res`; nothing above keeps a pointer into it.
-        unsafe { sys::ecs_command_result_fini(world, &mut res) };
+        // SAFETY: frees what ecs_shell_run allocated in `res`; nothing above keeps a pointer into it.
+        unsafe { sys::ecs_shell_result_fini(world, &mut res) };
         CommandResult { value, errors }
     }
 }
