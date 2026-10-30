@@ -1,0 +1,152 @@
+use crate::core::*;
+use crate::sys;
+use core::{ffi::c_void, marker::PhantomData, ops::Deref, ptr::NonNull};
+
+/// Implementations of this trait can provide a reference to a world to operations
+/// needing a world. This allows for easily extracting the world from things that
+/// already have a reference to one.
+pub trait WorldProvider<'a> {
+    #[doc(hidden)]
+    #[inline(always)]
+    fn world_ptr_mut(&self) -> *mut sys::ecs_world_t {
+        self.world().raw_world.as_ptr()
+    }
+    #[doc(hidden)]
+    #[inline(always)]
+    fn world_ptr(&self) -> *const sys::ecs_world_t {
+        self.world().raw_world.as_ptr()
+    }
+
+    fn world(&self) -> WorldRef<'a>;
+}
+
+impl<'a> WorldProvider<'a> for IdView<'a> {
+    #[inline(always)]
+    fn world(&self) -> WorldRef<'a> {
+        self.world
+    }
+}
+
+impl<'a> WorldProvider<'a> for EntityView<'a> {
+    #[inline(always)]
+    fn world(&self) -> WorldRef<'a> {
+        self.world
+    }
+}
+
+impl<'a, T: ComponentId> WorldProvider<'a> for Component<'a, T> {
+    #[inline(always)]
+    fn world(&self) -> WorldRef<'a> {
+        self.base.entity.world
+    }
+}
+
+impl<'a> WorldProvider<'a> for UntypedComponent<'a> {
+    #[inline(always)]
+    fn world(&self) -> WorldRef<'a> {
+        self.world
+    }
+}
+
+impl<'a> WorldProvider<'a> for &'a World {
+    #[inline(always)]
+    fn world(&self) -> WorldRef<'a> {
+        (*self).into()
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+pub struct WorldRef<'a> {
+    pub(crate) raw_world: NonNull<sys::ecs_world_t>,
+    pub(crate) components: NonNull<FlecsIdMap>,
+    pub(crate) components_array: NonNull<FlecsArray>,
+    _marker: PhantomData<&'a ()>,
+}
+
+impl<'a> WorldRef<'a> {
+    #[inline(always)]
+    pub fn real_world(&self) -> WorldRef<'a> {
+        // SAFETY: ecs_get_world returns a pointer to a valid world derived from self's world_ptr_mut.
+        unsafe {
+            WorldRef::from_ptr(
+                sys::ecs_get_world(self.world_ptr_mut() as *const c_void) as *mut sys::ecs_world_t
+            )
+        }
+    }
+
+    /// # Safety
+    /// Caller must ensure `raw_world` points to a valid `sys::ecs_world_t`
+    #[inline(always)]
+    pub unsafe fn from_ptr(raw_world: *mut sys::ecs_world_t) -> Self {
+        // SAFETY: caller guarantees raw_world points to a valid ecs_world_t, per fn's Safety doc.
+        unsafe {
+            WorldRef {
+                raw_world: NonNull::new_unchecked(raw_world),
+                components: NonNull::new_unchecked(World::get_components_map_ptr(raw_world)),
+                components_array: NonNull::new_unchecked(World::get_components_array_ptr(
+                    raw_world,
+                )),
+                _marker: PhantomData,
+            }
+        }
+    }
+}
+
+impl<'a> From<&'a World> for WorldRef<'a> {
+    #[inline(always)]
+    fn from(world: &'a World) -> Self {
+        WorldRef {
+            raw_world: world.raw_world,
+            components: world.components,
+            components_array: world.components_array,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'a> From<&'a mut World> for WorldRef<'a> {
+    #[inline(always)]
+    fn from(world: &'a mut World) -> Self {
+        WorldRef {
+            raw_world: world.raw_world,
+            components: world.components,
+            components_array: world.components_array,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl Deref for WorldRef<'_> {
+    type Target = World;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        // Both `WorldRef` and `World` are `#[repr(C)]` with the same three
+        // leading `NonNull` fields; `WorldRef`'s trailing `PhantomData` is a
+        // ZST. This assertion fails to compile if that ever stops holding.
+        const {
+            assert!(
+                core::mem::size_of::<WorldRef<'_>>() == core::mem::size_of::<World>()
+                    && core::mem::align_of::<WorldRef<'_>>() == core::mem::align_of::<World>(),
+                "WorldRef and World layout diverged; WorldRef: Deref<World> transmute is unsound"
+            );
+        }
+        // SAFETY: layout equivalence between WorldRef and World is asserted above.
+        unsafe { core::mem::transmute::<&WorldRef, &World>(self) }
+    }
+}
+
+impl<'a> WorldProvider<'a> for WorldRef<'a> {
+    #[inline(always)]
+    fn world(&self) -> WorldRef<'a> {
+        *self
+    }
+}
+
+impl<'a> WorldProvider<'a> for &WorldRef<'a> {
+    #[inline(always)]
+    fn world(&self) -> WorldRef<'a> {
+        **self
+    }
+}

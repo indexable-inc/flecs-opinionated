@@ -1,0 +1,116 @@
+#![doc(hidden)]
+use core::ffi::c_void;
+
+pub type FTime = f32;
+
+/// Type alias for extern function pointers that adapts to target platform
+#[cfg(target_family = "wasm")]
+pub(crate) type EcsCtxFreeT = extern "C" fn(*mut c_void);
+#[cfg(not(target_family = "wasm"))]
+pub(crate) type EcsCtxFreeT = extern "C-unwind" fn(*mut c_void);
+
+// #[doc(hidden)]
+// pub struct ReactorBindingType {
+//     pub(crate) callback: Option<*mut c_void>,
+//     pub(crate) free_callback: Option<EcsCtxFreeT>,
+// }
+
+// impl Drop for ReactorBindingType {
+//     fn drop(&mut self) {
+//         if let Some(callback) = self.callback {
+//             if let Some(free_callback) = self.free_callback {
+//                 free_callback(callback);
+//             }
+//         }
+//     }
+// }
+
+// impl Default for ReactorBindingType {
+//     fn default() -> Self {
+//         Self {
+//             callback: None,
+//             free_callback: None,
+//         }
+//     }
+// }
+
+// impl ReactorBindingType {
+//     pub(crate) fn new(callback: Option<*mut c_void>, free_callback: Option<EcsCtxFreeT>) -> Self {
+//         Self {
+//             callback,
+//             free_callback,
+//         }
+//     }
+// }
+// pub(crate) enum TypeBinding {
+//     Each(ReactorBindingType),
+//     EachEntity(ReactorBindingType),
+//     EachIter(ReactorBindingType),
+//     Run(ReactorBindingType),
+//     RunIter(ReactorBindingType),
+//     RunEach(ReactorBindingType),
+//     RunEachEntity(ReactorBindingType),
+// }
+
+pub(crate) struct ObserverEntityBindingCtx {
+    pub(crate) empty: Option<*mut c_void>,
+    pub(crate) empty_entity: Option<*mut c_void>,
+    pub(crate) payload: Option<*mut c_void>,
+    pub(crate) payload_entity: Option<*mut c_void>,
+    pub(crate) free_empty: Option<EcsCtxFreeT>,
+    pub(crate) free_empty_entity: Option<EcsCtxFreeT>,
+    pub(crate) free_payload: Option<EcsCtxFreeT>,
+    pub(crate) free_payload_entity: Option<EcsCtxFreeT>,
+}
+
+impl Drop for ObserverEntityBindingCtx {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+
+        if let Some(empty) = self.empty
+            && let Some(free_empty) = self.free_empty
+        {
+            free_empty(empty);
+        }
+        if let Some(entity) = self.empty_entity
+            && let Some(free_entity) = self.free_empty_entity
+        {
+            free_entity(entity);
+        }
+        if let Some(payload) = self.payload
+            && let Some(free_payload) = self.free_payload
+        {
+            free_payload(payload);
+        }
+        if let Some(payload_entity) = self.payload_entity
+            && let Some(free_payload_entity) = self.free_payload_entity
+        {
+            free_payload_entity(payload_entity);
+        }
+    }
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for ObserverEntityBindingCtx {
+    fn default() -> Self {
+        Self {
+            empty: None,
+            empty_entity: None,
+            payload: None,
+            payload_entity: None,
+            free_empty: None,
+            free_empty_entity: None,
+            free_payload: None,
+            free_payload_entity: None,
+        }
+    }
+}
+
+pub struct ImplementsClone<T>(core::marker::PhantomData<T>);
+pub struct ImplementsDefault<T>(core::marker::PhantomData<T>);
+pub struct ImplementsPartialEq<T>(core::marker::PhantomData<T>);
+pub struct ImplementsPartialOrd<T>(core::marker::PhantomData<T>);
+pub struct ImplementsSend<T>(core::marker::PhantomData<T>);
+pub struct ImplementsSync<T>(core::marker::PhantomData<T>);

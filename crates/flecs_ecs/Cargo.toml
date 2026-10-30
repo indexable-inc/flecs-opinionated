@@ -1,0 +1,198 @@
+[package]
+name = "flecs_ecs"
+version = "0.2.2"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Indra-db/Flecs-Rust"
+rust-version = "1.97"
+authors = ["Indra de Backere <debackere.indra@gmail.com>"]
+description = "Rust API for the C/CPP flecs ECS library <https://github.com/SanderMertens/flecs>"
+keywords = ["ecs", "flecs", "ECS", "game-development", "gamedev"]
+categories = ["game-development", "api-bindings", "simulation", "data-structures"]
+publish = false
+# Upstream's tests, benches and examples are not copied (SOURCE.md).
+autotests = false
+autobenches = false
+autoexamples = false
+
+[dependencies]
+flecs_ecs_derive = { path = "../flecs_ecs_derive" }
+flecs_ecs_sys = { path = "../flecs_ecs_sys", default-features = false, features = ["flecs_meta_c"] }
+bitflags = "2.10.0"
+compact_str = { version = "0.9.0", default-features = false }
+hashbrown = "0.16.0"
+libc = "0.2.177"
+smallvec = "1.15.1"
+capture-stdio = { version = "0.1.1", optional = true }
+
+[features] 
+######################
+# sys feature flags
+######################
+
+# Read write locks for components. Needs Flecs-Rust's patched Flecs C (FLECS_MUT_ALIAS_LOCKS), which upstream Flecs
+# does not have: enabling it is a build error in flecs_ecs_sys (SOURCE.md). Not in flecs_base any more.
+flecs_safety_locks = ["flecs_ecs_sys/flecs_safety_locks"]
+
+# Regenerate the C binding for flecs C
+flecs_regenerate_binding = ["flecs_ecs_sys/regenerate_binding"]
+
+# force build debug for flecs C, even in release mode
+flecs_force_build_debug_c = ["flecs_ecs_sys/force_build_debug"]
+
+# force build release for C flecs, even in debug mode
+flecs_force_build_release_c = ["flecs_ecs_sys/force_build_release"]
+
+ # When set, this will cause queries with the EcsQueryCacheDefault policy
+ # to default to EcsQueryCacheNone. This can reduce the memory footprint of
+ # applications at the cost of performance. Queries that use features which 
+ # require caching such as group_by and order_by will still use caching.
+flecs_default_to_uncached_queries = ["flecs_ecs_sys/flecs_default_to_uncached_queries"]
+
+# force enables both rust and c ecs asserts, useful when running release mode, but wanting the asserts for safety
+flecs_force_enable_ecs_asserts = ["flecs_ecs_sys/flecs_force_enable_ecs_asserts"]
+
+# tell C flecs to use the OS allocator instead of its own
+flecs_use_os_alloc = ["flecs_ecs_sys/use_os_alloc"]
+
+# Enabling this will not build a copy of flecs into this library.
+# Instead, the executable that this is linked with will need to
+# provide the symbols required. This is useful when using both
+# Rust and C++ code in an application and a copy of flecs is
+# already being linked into the executable via other means.
+flecs_disable_build_c = ["flecs_ecs_sys/disable_build_c"]
+
+######################
+# Flecs feature flags
+######################
+
+# When set, the Rust API will not attempt to discover and register enum 
+# constants for registered enum components. This will cause Rust APIs that 
+# accept enum constants to not work.
+# Disabling this feature will reduces the RAM footprint of an application.
+flecs_rust_no_enum_reflection = []
+
+# use std
+std = ["flecs_ecs_derive/std", "compact_str/std"]
+
+# Enable query trait for Rust
+flecs_query_rust_traits = ["flecs_ecs_derive/flecs_query_rust_traits"]
+
+# Enable flecs performance tracing
+flecs_perf_trace = ["flecs_ecs_sys/flecs_perf_trace"]
+
+# When set, the Rust API will require that components are registered before they
+# are used. This is useful in multithreaded applications, where components need
+# to be registered beforehand, and to catch issues in projects where component 
+# registration is mandatory. Disabling automatic component registration also
+# improves performance, more so in multi-world applications. 
+# The C API is not affected by this feature.
+flecs_manual_registration = []
+
+# Adjust the maximum number of terms in queries to 64. Default is 32.
+flecs_term_count_64 = ["flecs_ecs_sys/flecs_term_count_64"]
+
+# Module support
+flecs_module = ["flecs_ecs_sys/flecs_module"]
+
+# ECS data definition format
+flecs_script = ["flecs_ecs_sys/flecs_script", "flecs_meta", "flecs_doc", "flecs_module"]
+
+# Access runtime statistics
+flecs_stats = ["flecs_ecs_sys/flecs_stats", "flecs_pipeline", "flecs_timer", "flecs_module"]
+
+# Expose component data as statistics
+flecs_metrics = ["flecs_ecs_sys/flecs_metrics", "flecs_meta", "flecs_units", "flecs_pipeline"]
+
+# Monitor conditions for errors
+flecs_alerts = ["flecs_ecs_sys/flecs_alerts", "flecs_pipeline", "flecs_metrics", "flecs_timer"]
+
+# System support
+flecs_system = ["flecs_ecs_sys/flecs_system", "flecs_module"]
+
+# Pipeline support
+flecs_pipeline = ["flecs_ecs_sys/flecs_pipeline", "flecs_module", "flecs_system"]
+
+# Timer support
+flecs_timer = ["flecs_ecs_sys/flecs_timer", "flecs_module", "flecs_pipeline"]
+
+# Reflection support
+flecs_meta = ["flecs_ecs_sys/flecs_meta","flecs_ecs_derive/flecs_meta", "flecs_module"]
+
+# Builtin standard units
+flecs_units = ["flecs_ecs_sys/flecs_units", "flecs_module", "flecs_meta"]
+
+# Parsing JSON to/from component values
+flecs_json = ["flecs_ecs_sys/flecs_json", "flecs_meta"]
+
+# Document entities & components
+flecs_doc = ["flecs_ecs_sys/flecs_doc", "flecs_module"]
+
+# When enabled ECS provides more detailed logs
+flecs_log = ["flecs_ecs_sys/flecs_log"]
+
+# Application addon
+flecs_app = ["flecs_ecs_sys/flecs_app", "flecs_pipeline"]
+
+# Default implementation for OS API
+flecs_os_api_impl = ["flecs_ecs_sys/flecs_os_api_impl"]
+
+# Tiny HTTP server for connecting to remote UI
+flecs_http = ["flecs_ecs_sys/flecs_http"]
+
+# REST API for querying application data
+flecs_rest = ["flecs_ecs_sys/flecs_rest", "flecs_http", "flecs_json", "flecs_pipeline"]
+
+# Script shell: a command line into a live world (FLECS_SCRIPT_SHELL)
+flecs_script_shell = ["flecs_ecs_sys/flecs_script_shell", "flecs_script", "flecs_json"]
+
+# Journaling addon (disabled by default)
+flecs_journal = ["flecs_ecs_sys/flecs_journal","flecs_log"]
+
+# When enabled, flecs ecs library will run examples as test cases. Works only in Nightly
+flecs_nightly_tests = ["dep:capture-stdio"]
+
+# enable a backtrace on crashes during tests, used for e.g. debugging intermittent CI failures
+
+# most common base features
+# must be kept in sync with base features on flecs_ecs_sys cargo.toml
+flecs_base = [
+    "flecs_ecs_sys/flecs_base",
+   # this is commented since `no_std` is not ready yet
+    "std",
+    "flecs_module",
+    "flecs_system",
+    "flecs_pipeline",
+    "flecs_timer",
+    "flecs_os_api_impl",
+]
+
+default = [
+    #"flecs_regenerate_binding",
+    #"flecs_nightly_tests",
+    "flecs_base",
+    "flecs_script",
+    "flecs_stats",
+    "flecs_metrics",
+    "flecs_alerts",
+    "flecs_meta",
+    "flecs_units",
+    "flecs_json",
+    "flecs_doc",
+    "flecs_log",
+    "flecs_app",
+    "flecs_http",
+    "flecs_rest",
+    "flecs_query_rust_traits"
+]
+
+######################
+# Examples
+######################
+
+
+[lib]
+bench = false
+# Upstream's doc examples are not kept compiling here; host-check and the users' builds test the crate.
+doctest = false
+

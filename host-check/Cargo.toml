@@ -1,6 +1,6 @@
-# A separate workspace that checks host mode against the space game's Flecs: flecs_ecs and flecs_ecs_sys at the
-# game's rev, flecs_ecs_sys patched to vendor/flecs_ecs_sys as the game patches its copy, and flecs-snapshot with
-# `host` so the process has one Flecs. The main workspace never builds flecs_ecs_sys.
+# A separate workspace that checks host mode: an application on flecs_ecs (crates/flecs_ecs, whose flecs_ecs_sys
+# compiles vendor/flecs/distr) with flecs-snapshot's `host`, so the process has one Flecs. Separate so that `host`
+# (feature unification) never reaches the main workspace's own builds of flecs-c.
 [workspace]
 
 [package]
@@ -11,13 +11,10 @@ publish = false
 license = "MIT"
 
 [dependencies]
-flecs_ecs = { git = "https://github.com/Indra-db/Flecs-Rust", rev = "bf956db99b69d41ee142c9d52054911af28d7e93" }
+flecs_ecs = { path = "../crates/flecs_ecs" }
 flecs-snapshot = { path = "../crates/flecs-snapshot", features = ["host"] }
 flecs-describe = { path = "../crates/flecs-describe", features = ["flecs_ecs", "glam"] }
 glam = "0.33"
 ipld-core = "0.4"
 serde_ipld_dagcbor = "0.7"
 zstd = "0.13"
-
-[patch."https://github.com/Indra-db/Flecs-Rust"]
-flecs_ecs_sys = { path = "../vendor/flecs_ecs_sys" }

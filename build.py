@@ -98,7 +98,7 @@ async def build(test: bool) -> None:
         # The native-only REST server, on its own: in the workspace run it would change the native worlds the
         # byte-identity tests compare with wasm (REST imports the pipeline, timer and REST modules into every world).
         g.create_task(run("cargo test rest", ["cargo", "test", "-p", "flecs-c", "--features", "rest"], 900))
-        # Host mode against flecs_ecs at the space game's pin (its own workspace, patched to vendor/flecs_ecs_sys).
+        # Host mode: an application on crates/flecs_ecs (its own workspace, so `host` stays out of the one above).
         g.create_task(run("host-check", ["cargo", "test", "--manifest-path", "host-check/Cargo.toml"], 900))
         g.create_task(run("bun test", ["bun", "test"], 300))
         g.create_task(run("tsc tests", ["bun", "x", "tsc", "-p", "tsconfig.test.json"], 300))

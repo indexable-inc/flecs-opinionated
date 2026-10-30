@@ -1,0 +1,29 @@
+[package]
+name = "flecs_ecs_derive"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Indra-db/Flecs-Rust"
+description = "A procedural macro crate for the Flecs ECS library."
+rust-version = "1.97"
+publish = false
+
+[lib]
+proc-macro = true
+name = "flecs_ecs_derive"
+
+[dependencies]
+syn = { version = "2.0.110", features = ["full"] }
+quote = "1.0.42"
+proc-macro2 = "1.0.103"
+
+[package.metadata.docs.rs]
+rustdoc-args = [ "-Zunstable-options", "--generate-link-to-definition"]
+cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
+
+[features]
+
+flecs_meta = []
+flecs_query_rust_traits = []
+std = []
+default = []

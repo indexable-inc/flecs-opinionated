@@ -1,6 +1,16 @@
 [workspace]
 resolver = "3"
-members = ["crates/flecs-c", "crates/flecs-snapshot", "crates/flecs-describe", "crates/flecs-describe-derive", "merge"]
+members = [
+    "crates/flecs-c",
+    "crates/flecs-snapshot",
+    "crates/flecs-describe",
+    "crates/flecs-describe-derive",
+    # Flecs-Rust's crates, maintained here on upstream Flecs master (crates/flecs_ecs*/SOURCE.md).
+    "crates/flecs_ecs",
+    "crates/flecs_ecs_sys",
+    "crates/flecs_ecs_derive",
+    "merge",
+]
 exclude = ["host-check"]
 
 [profile.release]

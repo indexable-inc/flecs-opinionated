@@ -30,4 +30,4 @@ glam = { version = "0.33", optional = true }
 glamx = { version = "0.3", optional = true, default-features = false, features = ["std", "f64"] }
 half = { version = "2", optional = true }
 bitflags = { version = "2", optional = true }
-flecs_ecs = { git = "https://github.com/Indra-db/Flecs-Rust", rev = "bf956db99b69d41ee142c9d52054911af28d7e93", optional = true }
+flecs_ecs = { path = "../flecs_ecs", optional = true }

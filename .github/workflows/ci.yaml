@@ -37,8 +37,10 @@ jobs:
       - name: Lint
         run: |
           cargo fmt --all -- --check
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo clippy --workspace --all-targets --features flecs-snapshot/ffi,flecs-describe/glam,flecs-describe/half,flecs-describe/bitflags -- -D warnings
+          # Flecs-Rust's crates (crates/flecs_ecs*) keep upstream's code and lint level: built and checked, not -D warnings.
+          cargo clippy --workspace --all-targets --exclude flecs_ecs --exclude flecs_ecs_sys --exclude flecs_ecs_derive -- -D warnings
+          cargo clippy --workspace --all-targets --exclude flecs_ecs --exclude flecs_ecs_sys --exclude flecs_ecs_derive --features flecs-snapshot/ffi,flecs-describe/glam,flecs-describe/half,flecs-describe/bitflags -- -D warnings
+          cargo clippy -p flecs_ecs -p flecs_ecs_sys -p flecs_ecs_derive
           cargo clippy --manifest-path host-check/Cargo.toml --all-targets -- -D warnings
           cargo fmt --manifest-path host-check/Cargo.toml -- --check
           cargo clippy -p flecs-snapshot --target wasm32-unknown-unknown --features ffi -- -D warnings

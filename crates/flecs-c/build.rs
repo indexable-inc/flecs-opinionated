@@ -39,17 +39,15 @@ use sha2::{Digest, Sha256};
 
 fn main() {
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
-    // Host mode compiles glue.c against the host's own flecs.h: the game's tree (`<vendor>/flecs-opinionated/crates/
-    // flecs-c` beside `<vendor>/flecs_ecs_sys`) or host-check's copy of it (vendor/flecs_ecs_sys). Otherwise this
-    // repo's pin (vendor/flecs/distr), or, vendored into a host's tree, the host's amalgamation.
+    // The repository's one amalgamation (vendor/flecs/distr), in both modes: host mode compiles glue.c against the
+    // flecs.h that crates/flecs_ecs_sys compiles, so the glue and the host's Flecs always agree. `FLECS_DISTR` names
+    // another directory (flecs_ecs_sys reads the same variable).
     let host = env::var_os("CARGO_FEATURE_HOST").is_some();
-    let candidates: &[&str] = if host {
-        &[
-            "../../../flecs_ecs_sys/src",
-            "../../vendor/flecs_ecs_sys/src",
-        ]
-    } else {
-        &["../../vendor/flecs/distr", "../../../flecs_ecs_sys/src"]
+    println!("cargo:rerun-if-env-changed=FLECS_DISTR");
+    let distr = env::var("FLECS_DISTR").ok();
+    let candidates: Vec<&str> = match &distr {
+        Some(d) => vec![d.as_str()],
+        None => vec!["../../vendor/flecs/distr"],
     };
     let flecs = candidates
         .iter()
@@ -72,7 +70,9 @@ fn main() {
     if host {
         // Host mode: only the glue, against the host's Flecs (flecs_ecs_sys, which this crate depends on, so the
         // linker sees glue before Flecs). The defines that change Flecs's struct layouts must match the host's
-        // build: flecs_ecs_sys compiles FLECS_DEBUG unless the profile is release (its build.rs), and FLECS_CPP.
+        // build: flecs_ecs_sys compiles FLECS_DEBUG unless the profile is release (its build.rs), FLECS_CPP, and
+        // its always-on addons (its build.rs `ALWAYS`): CACHED_QUERIES and QUERY_PLANS size `ecs_iter_t`, which the
+        // glue keeps on its stack.
         let release = env::var("PROFILE").is_ok_and(|p| p == "release");
         b.file(root.join("csrc/glue.c"))
             .include(&flecs)
@@ -81,6 +81,14 @@ fn main() {
             .define("FLECS_META", None)
             .define("FLECS_SCRIPT", None)
             .define("FLECS_LOG", None)
+            .define("FLECS_CACHED_QUERIES", None)
+            .define("FLECS_QUERY_PLANS", None)
+            .define("FLECS_QUERY_DSL", None)
+            .define("FLECS_PARSER", None)
+            .define("FLECS_PREFAB", None)
+            .define("FLECS_CONSTRAINT_TRAITS", None)
+            .define("FLECS_ENTITY_RANGES", None)
+            .define("FLECS_MULTI_WORLD", None)
             .define("GLUE_HOST", None)
             .opt_level(2)
             .debug(false)

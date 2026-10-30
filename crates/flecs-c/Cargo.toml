@@ -9,15 +9,15 @@ links = "flecs"
 
 [features]
 # Link the host application's Flecs instead of compiling one: only csrc/glue.c is compiled, and the ecs_* symbols come
-# from flecs_ecs_sys, so the process has one Flecs (SPEC.md, "Host worlds"). The rev is the space game's pin; the game
-# patches it to its vendored copy, host-check/ to vendor/flecs_ecs_sys.
+# from flecs_ecs_sys (crates/flecs_ecs_sys, built from the same vendor/flecs/distr), so the process has one Flecs
+# (SPEC.md, "Host worlds").
 host = ["dep:flecs_ecs_sys"]
 # Native only: Flecs's REST API (and the HTTP, JSON and pipeline addons it needs) and `glue_rest_*`, a read-only REST
 # server a host feeds requests to. wasm32 and host builds refuse it (build.rs).
 rest = []
 
 [dependencies]
-flecs_ecs_sys = { git = "https://github.com/Indra-db/Flecs-Rust", rev = "bf956db99b69d41ee142c9d52054911af28d7e93", optional = true }
+flecs_ecs_sys = { path = "../flecs_ecs_sys", optional = true, default-features = false, features = ["flecs_meta_c"] }
 
 [build-dependencies]
 cc = "1"
