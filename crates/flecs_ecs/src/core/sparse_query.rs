@@ -90,7 +90,9 @@ impl<'a, T: QueryTuple> SparseQuery<'a, T> {
     }
 
     fn storage(&self, id: sys::ecs_id_t) -> *mut sys::ecs_sparse_t {
-        let cr = unsafe { crate::core::utility::flecs_components_get_any(self.world.world_ptr_mut(), id) };
+        let cr = unsafe {
+            crate::core::utility::flecs_components_get_any(self.world.world_ptr_mut(), id)
+        };
         if cr.is_null() {
             core::ptr::null_mut()
         } else {
@@ -110,7 +112,8 @@ impl<'a, T: QueryTuple> SparseQuery<'a, T> {
                 return;
             }
             sparse[f] = s;
-            let cr = unsafe { crate::core::utility::flecs_components_get_any(world_ptr, self.ids[f]) };
+            let cr =
+                unsafe { crate::core::utility::flecs_components_get_any(world_ptr, self.ids[f]) };
             let ti = unsafe { sys::ecs_rust_get_type_info_from_record(world_ptr, self.ids[f], cr) };
             ecs_assert!(
                 !ti.is_null(),
