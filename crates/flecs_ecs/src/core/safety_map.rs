@@ -427,7 +427,7 @@ fn __internal_do_read_write_locks<
 
             //if component_id is set, that means this term is a row term
             if ANY_SPARSE_TERMS && info.component_id != 0 {
-                let idr = sys::flecs_components_get(world.raw_world.as_ptr(), info.component_id);
+                let idr = crate::core::utility::flecs_components_get_any(world.raw_world.as_ptr(), info.component_id);
                 lock_sparse::<INCREMENT, true, MULTITHREADED>(world, idr);
                 continue;
             }
@@ -442,7 +442,7 @@ fn __internal_do_read_write_locks<
 
             //if component_id is set, that means this term is a row term
             if ANY_SPARSE_TERMS && info.component_id != 0 {
-                let idr = sys::flecs_components_get(world.raw_world.as_ptr(), info.component_id);
+                let idr = crate::core::utility::flecs_components_get_any(world.raw_world.as_ptr(), info.component_id);
                 lock_sparse::<INCREMENT, false, MULTITHREADED>(world, idr);
                 continue;
             }
@@ -460,7 +460,7 @@ fn __internal_do_read_write_locks<
             let info = table_records.get_unchecked(i);
 
             if ANY_SPARSE_TERMS && info.component_id != 0 {
-                let idr = sys::flecs_components_get(world.raw_world.as_ptr(), info.component_id);
+                let idr = crate::core::utility::flecs_components_get_any(world.raw_world.as_ptr(), info.component_id);
                 lock_sparse::<INCREMENT, true, MULTITHREADED>(world, idr);
                 continue;
             }
@@ -478,7 +478,7 @@ fn __internal_do_read_write_locks<
             let info = table_records.get_unchecked(i);
 
             if ANY_SPARSE_TERMS && info.component_id != 0 {
-                let idr = sys::flecs_components_get(world.raw_world.as_ptr(), info.component_id);
+                let idr = crate::core::utility::flecs_components_get_any(world.raw_world.as_ptr(), info.component_id);
                 lock_sparse::<INCREMENT, false, MULTITHREADED>(world, idr);
                 continue;
             }

@@ -778,3 +778,24 @@ mod tests {
         );
     }
 }
+
+/// The component record for `id`, for a world *or a stage* pointer.
+///
+/// `flecs_components_get` is an internal Flecs function that reads `world->id_index_lo`
+/// directly and does not resolve a stage to its world (it only asserts the poly type in
+/// debug builds). Inside systems and observers `iter.world` is a stage, so passing it
+/// straight through reads a stage field as the id index and faults. Resolve the real world
+/// first, as Flecs' own public API does.
+///
+/// # Safety
+/// `world` must point to a live `ecs_world_t` or `ecs_stage_t`.
+#[inline(always)]
+pub(crate) unsafe fn flecs_components_get_any(
+    world: *const sys::ecs_world_t,
+    id: sys::ecs_id_t,
+) -> *mut sys::ecs_component_record_t {
+    unsafe {
+        let real = sys::ecs_get_world(world as *const core::ffi::c_void) as *const sys::ecs_world_t;
+        sys::flecs_components_get(real, id)
+    }
+}

@@ -2140,7 +2140,7 @@ where
                 unsafe { (*tr).hdr.cr }
             } else {
                 let comp_id = unsafe { *self.iter.ids.add(index as usize) };
-                unsafe { sys::flecs_components_get(world_ref.raw_world.as_ptr(), comp_id) }
+                unsafe { crate::core::utility::flecs_components_get_any(world_ref.raw_world.as_ptr(), comp_id) }
             };
 
             FieldAt::<T::UnderlyingType>::new(component_ref, world_ref, unsafe {
@@ -2189,7 +2189,7 @@ where
                 unsafe { (*tr).hdr.cr }
             } else {
                 let comp_id = unsafe { *self.iter.ids.add(index as usize) };
-                unsafe { sys::flecs_components_get(world_ref.raw_world.as_ptr(), comp_id) }
+                unsafe { crate::core::utility::flecs_components_get_any(world_ref.raw_world.as_ptr(), comp_id) }
             };
 
             Some(FieldAt::<T::UnderlyingType>::new(
@@ -2237,7 +2237,7 @@ where
                 unsafe { (*tr).hdr.cr }
             } else {
                 let comp_id = unsafe { *self.iter.ids.add(index as usize) };
-                unsafe { sys::flecs_components_get(world_ref.raw_world.as_ptr(), comp_id) }
+                unsafe { crate::core::utility::flecs_components_get_any(world_ref.raw_world.as_ptr(), comp_id) }
             };
 
             FieldAtMut::<T::UnderlyingType>::new(component_ref, world_ref, unsafe {
@@ -2286,7 +2286,7 @@ where
                 unsafe { (*tr).hdr.cr }
             } else {
                 let comp_id = unsafe { *self.iter.ids.add(index as usize) };
-                unsafe { sys::flecs_components_get(world_ref.raw_world.as_ptr(), comp_id) }
+                unsafe { crate::core::utility::flecs_components_get_any(world_ref.raw_world.as_ptr(), comp_id) }
             };
 
             Some(FieldAtMut::<T::UnderlyingType>::new(
