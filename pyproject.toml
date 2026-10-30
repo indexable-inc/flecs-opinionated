@@ -23,6 +23,6 @@ extend-exclude = ["vendor", "lean/.lake", "lean/.tools"]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
 [tool.pyright]
-include = ["build.py", "lean/regen.py"]
+include = ["build.py", "lean/regen.py", "scripts/bump_flecs.py"]
 pythonVersion = "3.13"
 typeCheckingMode = "strict"

@@ -12,7 +12,8 @@
 - `merge/` and `lean/` belong to another lane; call them through `flecs_snapshot::merge` (`merge_state`,
   `merge_fields`), which converts the DAG-CBOR state encoding (SPEC "Merge states").
 - Build and test with `uv run build.py --test` in an ix VM, not a laptop.
-- Flecs C is upstream, unpatched. `vendor/flecs/distr` is the amalgamation of one upstream SanderMertens/flecs
-  commit, named in `vendor/flecs/SOURCE.md`. A Flecs bug or missing feature is fixed with a PR to SanderMertens/flecs
-  (from a fork under andrewgazelka), not a local patch. Until it merges, pin the PR's fork branch commit in SOURCE.md
-  with a link to the PR, and move back to an upstream master commit once it lands. No "rgb fork" hunks.
+- Flecs C is upstream-first, never patched locally. `vendor/flecs/distr` is the amalgamation of one commit of
+  indexable-inc/flecs `master`, which is upstream SanderMertens/flecs `master` plus our open upstream PRs, rebased;
+  `vendor/flecs/SOURCE.md` names the commit, its upstream base and the PRs. A Flecs bug or missing feature is fixed
+  with a PR to SanderMertens/flecs opened from its own branch on indexable-inc/flecs; its commit also goes on the
+  fork's `master` until it merges. Bump with `scripts/bump_flecs.py`. No "rgb fork" hunks.

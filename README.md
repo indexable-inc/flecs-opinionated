@@ -148,8 +148,10 @@ Requirements:
 - an unwrapped clang and llvm-ar (clang 18 or later) for wasm, set as `CC_wasm32_unknown_unknown` and
   `AR_wasm32_unknown_unknown`. A nix cc-wrapper adds host flags and breaks the build.
 
-Flecs is vendored in `vendor/flecs`: upstream Flecs C master (`c73ce7115`), with no fork and no local patches
-(`vendor/flecs/SOURCE.md`). Host mode instead compiles against the host's Flecs; `host-check` checks that pairing. It is built
+Flecs is vendored in `vendor/flecs`: a commit of [indexable-inc/flecs](https://github.com/indexable-inc/flecs)
+`master`, which is upstream Flecs C master plus our open upstream PRs (today none, so it is upstream `c73ce7115`), with
+no local patches (`vendor/flecs/SOURCE.md`). Host mode links the same Flecs through `crates/flecs_ecs_sys`; `host-check`
+checks that pairing. It is built
 with the LOG, SCRIPT (with META, DOC and PARSER) and PREFAB addons; natively, `flecs-c`'s `rest` feature adds Flecs's
 REST API (`glue_rest_*`, read only, served one request at a time by the caller). The release wasm is about 1.35 MB (480 KB gzipped), built with
 `opt-level = "s"` and then `wasm-opt -Os` (binaryen version_133; set `WASM_OPT` or put it on PATH).
