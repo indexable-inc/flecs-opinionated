@@ -78,6 +78,33 @@ impl<'a> ScriptEntityView<'a> {
         }
     }
 
+    /// Reload the script from new code, or from the file it was loaded from when `code` is `None`
+    /// (`ecs_script_reload`).
+    ///
+    /// The new code is parsed before anything changes; on a parse error the world is untouched and the error is
+    /// stored in the script's `EcsScript::error`. Entities the new version no longer defines are deleted, changed ones
+    /// are updated and new ones created.
+    ///
+    /// # Returns
+    ///
+    /// True if success, false if failed.
+    pub fn reload(&self, code: Option<&str>) -> bool {
+        let code = code.map(|c| compact_str::format_compact!("{}\0", c));
+        let code_ptr = code.as_ref().map_or(core::ptr::null(), |c| c.as_ptr() as *const _);
+        // SAFETY: the world is live for 'a; `code_ptr` is null or a NUL-terminated string that outlives the call.
+        unsafe { sys::ecs_script_reload(self.world.world_ptr_mut(), *self.id, code_ptr) == 0 }
+    }
+
+    /// Undo the last change to the script's code and reload it (`ecs_script_undo`).
+    ///
+    /// # Returns
+    ///
+    /// True if success, false if the undo history is empty or the reload failed.
+    pub fn undo(&self) -> bool {
+        // SAFETY: the world is live for 'a.
+        unsafe { sys::ecs_script_undo(self.world.world_ptr_mut(), *self.id) == 0 }
+    }
+
     /// Convert script AST to string.
     /// This operation converts the script abstract syntax tree to a string, which can be used to debug a script.
     ///

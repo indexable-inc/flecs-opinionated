@@ -20,6 +20,8 @@ impl<'a> ScriptBuilder<'a> {
                 entity: 0,
                 filename: core::ptr::null(),
                 code: core::ptr::null(),
+                skip_unknown: false,
+                ir: false,
             },
             world: world.world(),
         }
@@ -43,6 +45,8 @@ impl<'a> ScriptBuilder<'a> {
                 entity: unsafe { sys::ecs_entity_init(world.world_ptr_mut(), &entity_desc) },
                 filename: core::ptr::null(),
                 code: core::ptr::null(),
+                skip_unknown: false,
+                ir: false,
             },
             world: world.world(),
         }
@@ -59,9 +63,23 @@ impl<'a> ScriptBuilder<'a> {
                 entity: entity.into().into(),
                 filename: core::ptr::null(),
                 code: core::ptr::null(),
+                skip_unknown: false,
+                ir: false,
             },
             world: world.world(),
         }
+    }
+
+    /// Skip unknown identifiers instead of failing (`ecs_script_desc_t::skip_unknown`).
+    pub fn skip_unknown(&mut self, skip: bool) -> &mut Self {
+        self.script.skip_unknown = skip;
+        self
+    }
+
+    /// Evaluate with the IR runtime instead of the AST runtime (`ecs_script_desc_t::ir`).
+    pub fn ir(&mut self, ir: bool) -> &mut Self {
+        self.script.ir = ir;
+        self
     }
 
     /// Loads a managed script from a file into the ECS world.

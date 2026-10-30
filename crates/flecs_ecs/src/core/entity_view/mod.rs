@@ -8,3 +8,4 @@ mod macros;
 
 pub use entity_view_const::EntityView;
 pub use entity_view_const::EntityViewGet;
+pub(crate) use entity_view_const::TableLockGuard;

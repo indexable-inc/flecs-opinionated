@@ -1,6 +1,6 @@
 //! Iterators used to iterate over tables and table rows in [`Query`], [`System`][crate::addons::system::System] and [`Observer`].
 use core::marker::PhantomData;
-use core::{ffi::CStr, ffi::c_void, ptr::NonNull};
+use core::{ffi::c_void, ptr::NonNull};
 
 use crate::core::*;
 use crate::sys;
@@ -57,7 +57,7 @@ where
 
     /// Actual world. Never points to a stage.
     pub fn real_world(&self) -> WorldRef<'a> {
-        unsafe { WorldRef::from_ptr(self.iter.real_world) }
+        unsafe { WorldRef::from_ptr(self.iter.world) }
     }
 
     /// Returns the raw flecs iterator pointer for direct C API interop.
@@ -469,13 +469,6 @@ where
     /// Obtain term that triggered an observer
     pub fn term_index(&self) -> i8 {
         self.iter.term_index
-    }
-
-    /// Convert current iterator result to string
-    pub fn to_str(&self) -> &'a CStr {
-        let c_str = unsafe { sys::ecs_iter_str(self.iter) };
-        ecs_assert!(!c_str.is_null(), FlecsErrorCode::InvalidParameter);
-        unsafe { CStr::from_ptr(c_str) }
     }
 
     #[inline(always)]
@@ -2389,7 +2382,7 @@ where
             );
             let target = EntityView::new_from(
                 self.world(),
-                ecs_second(id, unsafe { WorldRef::from_ptr(self.iter.world) }),
+                ecs_second(id, unsafe { WorldRef::from_ptr(self.iter.stage) }),
             );
             func(target);
             i += 1;
@@ -2402,7 +2395,7 @@ where
             #[cfg(any(debug_assertions, feature = "flecs_force_enable_ecs_asserts"))]
             if self.iter.flags & sys::EcsIterIsValid != 0 && !self.iter.table.is_null() {
                 unsafe {
-                    sys::ecs_table_unlock(self.iter.world, self.iter.table);
+                    sys::ecs_table_unlock(self.iter.stage, self.iter.table);
                 };
             }
         }
@@ -2426,7 +2419,7 @@ where
             {
                 if result && !self.iter.table.is_null() {
                     unsafe {
-                        sys::ecs_table_lock(self.iter.world, self.iter.table);
+                        sys::ecs_table_lock(self.iter.stage, self.iter.table);
                     };
                 }
             }
@@ -2477,7 +2470,7 @@ where
         #[cfg(any(debug_assertions, feature = "flecs_force_enable_ecs_asserts"))]
         if self.iter.flags & sys::EcsIterIsValid != 0 && !self.iter.table.is_null() {
             unsafe {
-                sys::ecs_table_unlock(self.iter.world, self.iter.table);
+                sys::ecs_table_unlock(self.iter.stage, self.iter.table);
             };
         }
 

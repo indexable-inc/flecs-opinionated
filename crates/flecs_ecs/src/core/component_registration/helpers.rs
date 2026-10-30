@@ -73,6 +73,7 @@ where
         hooks,
         component: 0,
         name: core::ptr::null(),
+        refcount: 0,
     };
     type_info
 }
@@ -90,9 +91,6 @@ pub(crate) fn create_entity_desc(
         root_sep: SEPARATOR.as_ptr(),
         symbol,
         use_low_id: true,
-        add: core::ptr::null(),
-        add_expr: core::ptr::null(),
-        set: core::ptr::null(),
     };
     entity_desc
 }
@@ -119,6 +117,7 @@ pub(crate) fn external_create_type_info<T: 'static>() -> flecs_ecs_sys::ecs_type
         hooks,
         component: 0,
         name: core::ptr::null(),
+        refcount: 0,
     };
     type_info
 }

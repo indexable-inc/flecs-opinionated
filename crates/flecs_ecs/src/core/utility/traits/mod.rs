@@ -84,7 +84,7 @@ pub mod private {
             unsafe {
                 let iter = &mut *iter;
                 let each = &mut *(iter.callback_ctx as *mut Func);
-                let world = WorldRef::from_ptr(iter.world);
+                let world = WorldRef::from_ptr(iter.stage);
                 #[cfg(feature = "flecs_safety_locks")]
                 if iter.row_fields == 0 {
                     internal_each_iter_next::<T, CALLED_FROM_RUN, false>(iter, &world, each);
@@ -112,7 +112,7 @@ pub mod private {
         {
             unsafe {
                 let iter = &mut *iter;
-                let world = WorldRef::from_ptr(iter.world);
+                let world = WorldRef::from_ptr(iter.stage);
                 let each_entity = &mut *(iter.callback_ctx as *mut Func);
                 #[cfg(feature = "flecs_safety_locks")]
                 if iter.row_fields == 0 {
@@ -148,7 +148,7 @@ pub mod private {
         {
             unsafe {
                 let iter = &mut *iter;
-                let world = WorldRef::from_ptr(iter.world);
+                let world = WorldRef::from_ptr(iter.stage);
                 let each_iter = &mut *(iter.callback_ctx as *mut Func);
                 #[cfg(feature = "flecs_safety_locks")]
                 if iter.row_fields == 0 {
@@ -179,7 +179,7 @@ pub mod private {
                 let iter = &mut *iter;
                 let run_ptr = iter.run_ctx.cast::<Func>();
                 let run = &mut *run_ptr;
-                let world = WorldRef::from_ptr(iter.world);
+                let world = WorldRef::from_ptr(iter.stage);
                 internal_run::<P>(iter, run, world);
             }
         }
@@ -201,7 +201,7 @@ pub mod private {
             unsafe {
                 let iter = &mut *iter;
                 iter.flags &= !sys::EcsIterIsValid;
-                let world = WorldRef::from_ptr(iter.world);
+                let world = WorldRef::from_ptr(iter.stage);
                 let each_ptr = iter.run_ctx.cast::<Func>();
                 let each = &mut *each_ptr;
                 let mut table_iter = TableIter::<true, ()>::new(iter, world);
@@ -246,7 +246,7 @@ pub mod private {
             unsafe {
                 let iter = &mut *iter;
                 iter.flags &= !sys::EcsIterIsValid;
-                let world = WorldRef::from_ptr(iter.world);
+                let world = WorldRef::from_ptr(iter.stage);
                 let each_entity_ptr = iter.run_ctx.cast::<Func>();
                 let each_entity = &mut *each_entity_ptr;
                 let mut table_iter = TableIter::<true, ()>::new(iter, world);
@@ -306,7 +306,7 @@ pub mod private {
             unsafe {
                 let iter = &mut *iter;
                 iter.flags &= !sys::EcsIterIsValid;
-                let world = WorldRef::from_ptr(iter.world);
+                let world = WorldRef::from_ptr(iter.stage);
                 let each_iter_ptr = iter.run_ctx.cast::<Func>();
                 let each_iter = &mut *each_iter_ptr;
                 let mut table_iter = TableIter::<true, ()>::new(iter, world);
@@ -542,7 +542,7 @@ pub(crate) fn internal_each_generic<
     // #[cfg(feature = "flecs_safety_locks")]
     // let world = unsafe { WorldRef::from_ptr((iter).world) };
     #[cfg(any(debug_assertions, feature = "flecs_force_enable_ecs_asserts"))]
-    let world_ptr = iter.world;
+    let world_ptr = iter.stage;
     iter.flags |= sys::EcsIterCppEach;
     let (is_any_array, mut components_data) = T::create_ptrs(iter);
     let count = if iter.count == 0 && iter.table.is_null() {
@@ -660,7 +660,7 @@ pub(crate) fn internal_each_iter<
 
     unsafe {
         #[cfg(any(debug_assertions, feature = "flecs_force_enable_ecs_asserts"))]
-        let world_ptr = iter.world;
+        let world_ptr = iter.stage;
         iter.flags |= sys::EcsIterCppEach;
         let (is_any_array, mut components_data) = T::create_ptrs(iter);
         let count = if iter.count == 0 && iter.table.is_null() {

@@ -104,9 +104,6 @@ impl World {
             parent: 0,
             symbol: core::ptr::null(),
             use_low_id: false,
-            add: core::ptr::null(),
-            add_expr: core::ptr::null(),
-            set: core::ptr::null(),
         };
         let id = unsafe { sys::ecs_entity_init(self.world_ptr_mut(), &desc) };
 

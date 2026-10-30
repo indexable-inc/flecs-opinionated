@@ -8,7 +8,6 @@ use crate::sys;
 struct ScopeWithGuard {
     world: *mut sys::ecs_world_t,
     prev_scope: Option<sys::ecs_entity_t>,
-    prev_with: Option<sys::ecs_id_t>,
 }
 
 impl ScopeWithGuard {
@@ -18,7 +17,6 @@ impl ScopeWithGuard {
             return Self {
                 world,
                 prev_scope: None,
-                prev_with: None,
             };
         }
 
@@ -32,29 +30,15 @@ impl ScopeWithGuard {
             }
         };
 
-        let prev_with = unsafe {
-            let previous_with = sys::ecs_set_with(world, 0);
-            if previous_with != 0 {
-                Some(previous_with)
-            } else {
-                None
-            }
-        };
-
         Self {
             world,
             prev_scope,
-            prev_with,
         }
     }
 }
 
 impl Drop for ScopeWithGuard {
     fn drop(&mut self) {
-        if let Some(prev_with) = self.prev_with {
-            unsafe { sys::ecs_set_with(self.world, prev_with) };
-        }
-
         if let Some(prev_scope) = self.prev_scope {
             unsafe { sys::ecs_set_scope(self.world, prev_scope) };
         }

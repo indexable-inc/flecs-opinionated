@@ -131,9 +131,6 @@ impl Default for ecs_entity_desc_t {
             root_sep: core::ptr::null(),
             symbol: core::ptr::null(),
             use_low_id: Default::default(),
-            add: core::ptr::null(),
-            add_expr: core::ptr::null(),
-            set: core::ptr::null(),
             parent: Default::default(),
         }
     }

@@ -142,7 +142,7 @@ impl<'a, T: QueryTuple> SparseQuery<'a, T> {
                 ptrs[f] = ptr as *mut u8;
             }
 
-            let record = unsafe { sys::ecs_record_find(world_ptr, e) };
+            let record = unsafe { sys::ecs_rust_record_find(world_ptr, e) };
             let table = unsafe { (*record).table };
             let flags = unsafe { sys::flecs_table_flags(table) };
             if flags & (sys::EcsTableNotQueryable | sys::EcsTableIsPrefab | sys::EcsTableIsDisabled)

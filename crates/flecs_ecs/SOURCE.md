@@ -25,3 +25,36 @@ side.
 - `flecs_safety_locks` is no longer in `flecs_base` (so not a default): it needs Flecs-Rust's patch to Flecs C
   (`FLECS_MUT_ALIAS_LOCKS`), which upstream does not have, and enabling it is a build error.
 - `flecs_script_shell`: Flecs's script shell addon.
+
+## Port to Flecs master
+
+Master has no implicit defer mode: an operation is queued only when it is issued through a stage (`ecs_is_stage`),
+and `ecs_merge(stage)` flushes one stage. The iterator and query fields were renamed (the old `world`, a stage, is
+`stage`; the old `real_world` is `world`), and the builtin ids were renumbered (`c_types.rs` follows master). Upstream
+Flecs's C++ API (`include/flecs/addons/cpp/`) made the same moves; this port follows it.
+
+API changes for users:
+
+- `World::defer_begin`, `defer_end`, `defer_suspend`, `defer_resume`, `is_defer_suspended` are gone. `World::defer`
+  now passes the stage: `world.defer(|stage| { ... })`, and operations go through `stage`. On a stage handle it runs
+  the closure directly; otherwise it uses stage 0 and merges it after the closure (not while readonly).
+- `World::is_deferred` is `ecs_is_stage` (true for a stage handle).
+- `World::with`, `with_enum`, `with_enum_pair` and `EntityView::with`, `with_first`, `with_second` are gone (master
+  removed `ecs_set_with`/`ecs_get_with`): add the ids explicitly.
+- `EntityView::slot_of`, `slot`, `flecs::SlotOf` and `flecs::DefaultChildComponent` are gone.
+- `flecs::Copy` is new (master renamed `(OnInstantiate, Override)`); `flecs::Override` is an alias of it, and
+  `OnInstantiatePolicy::Override` is `OnInstantiatePolicy::Copy` (the default).
+- `TableIter::to_str` is gone (master removed `ecs_iter_str`).
+- `get` callbacks, singleton callbacks and the table guards (`TableEntities`, `TableColumnMut`) lock the table instead
+  of deferring (`ecs_table_lock`, as master's C++ does): a structural change inside them asserts in debug builds and
+  is not queued.
+- `TableFlags::HasDontFragment` is `EdgeDontFragment`; `HasDerived`, `HasParent`, `Empty`, `NotEmpty`, `HasUpNotify`
+  and `RemoveActionFlags` are new.
+- New: `EntityView::ordered_children` (`ecs_get_ordered_children`, for `(OrderedChildren)` and `Parent` children),
+  `ScriptEntityView::reload(Option<&str>)` and `undo()`, `ScriptBuilder::skip_unknown` and `ir`, and with
+  `flecs_script_shell` `World::command_session` and `World::command_run` (`src/addons/script/shell.rs`).
+- `sys::ecs_entity_desc_t` has no `add`, `add_expr` or `set`; master removed `ecs_record_find`, so
+  record lookups use `sys::ecs_rust_record_find` (`flecs_ecs_sys/src/flecs_rust.c`, 4.1.6's semantics).
+- `System::update` and `Observer::update` are unchanged.
+
+`flecs::Parent`, `flecs::OrderedChildren`, `flecs::DontFragment` and `flecs::Sparse` were already exposed.

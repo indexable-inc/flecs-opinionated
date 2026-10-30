@@ -105,8 +105,22 @@ bitflags::bitflags! {
         const HasOnTableDelete = sys::EcsTableHasOnTableDelete;
         /// Table has sparse components (stored outside the table).
         const HasSparse = sys::EcsTableHasSparse;
-        /// Table has components with the `DontFragment` trait.
-        const HasDontFragment = sys::EcsTableHasDontFragment;
+        /// Table edge adds or removes `DontFragment` components (Flecs master renamed `EcsTableHasDontFragment`).
+        const EdgeDontFragment = sys::EcsTableEdgeDontFragment;
+        /// Old name of [`Self::EdgeDontFragment`].
+        const HasDontFragment = sys::EcsTableEdgeDontFragment;
+        /// Table has components that inherit from a base.
+        const HasDerived = sys::EcsTableHasDerived;
+        /// Table type has the `Parent` component.
+        const HasParent = sys::EcsTableHasParent;
+        /// Table has no entities.
+        const Empty = sys::EcsTableEmpty;
+        /// Table has entities.
+        const NotEmpty = sys::EcsTableNotEmpty;
+        /// Table has components that notify observers upwards.
+        const HasUpNotify = sys::EcsTableHasUpNotify;
+        /// Flags of tables whose removal needs extra actions.
+        const RemoveActionFlags = sys::EcsTableRemoveActionFlags;
         /// Table overrides the `DontFragment` behavior.
         const OverrideDontFragment = sys::EcsTableOverrideDontFragment;
         /// Table has traversable relationships.

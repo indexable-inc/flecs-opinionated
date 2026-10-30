@@ -402,17 +402,33 @@ impl World {
         unsafe { sys::ecs_stage_is_readonly(self.raw_world.as_ptr()) }
     }
 
-    /// Defers operations until the end of the frame.
+    /// Whether operations on this handle are deferred.
     ///
-    /// When this operation is invoked while iterating, the operations between
-    /// [`World::defer_begin()`] and [`World::defer_end()`] are executed at the
-    /// end of the frame.
+    /// Flecs master has no implicit defer mode: an operation is enqueued exactly when it is issued through a
+    /// stage (`ecs_is_stage`), as in systems, observers on a stage and the handle [`World::defer()`] passes to
+    /// its closure. On the world itself operations apply immediately.
     ///
-    /// # Thread Safety
-    /// This operation is thread safe.
+    /// # Example
     ///
-    /// # Returns
-    /// Whether the operation was successful.
+    /// ```
+    /// use flecs_ecs::prelude::*;
+    ///
+    /// let world = World::new();
+    /// assert!(!world.is_deferred());
+    /// world.defer(|stage| assert!(stage.is_deferred()));
+    /// ```
+    pub fn is_deferred(&self) -> bool {
+        unsafe { sys::ecs_is_stage(self.raw_world.as_ptr()) }
+    }
+
+    /// Runs `func` with a stage whose operations are enqueued, and applies them when `func` returns.
+    ///
+    /// This replaces `defer_begin`/`defer_end`, `defer_suspend`/`defer_resume` and `is_defer_suspended`, which
+    /// Flecs master removed: there is no defer mode, an operation is enqueued exactly when it is issued through a
+    /// stage. Issue the operations to defer through the handle passed to `func`; operations on the world itself
+    /// still apply immediately. `func` gets stage 0, which is merged (`ecs_merge`) when it returns. If this handle
+    /// already is a stage, `func` gets it and nothing is merged here; if the world is readonly (a system or a frame
+    /// is running) the commands merge when it leaves readonly mode.
     ///
     /// # Example
     ///
@@ -426,163 +442,33 @@ impl World {
     /// }
     ///
     /// let world = World::new();
-    ///
-    /// world.defer_begin();
-    ///
-    /// let e = world.entity().set(Position { x: 10, y: 20 });
-    ///
-    /// assert!(!e.has(Position::id()));
-    ///
-    /// world.defer_end();
-    ///
+    /// let e = world.entity();
+    /// world.defer(|stage| {
+    ///     e.mut_current_stage(stage).set(Position { x: 10, y: 20 });
+    ///     assert!(!e.has(Position::id()));
+    /// });
     /// assert!(e.has(Position::id()));
     /// ```
-    ///
-    /// # See also
-    ///
-    /// * [`World::defer()`]
-    /// * [`World::defer_end()`]
-    /// * [`World::defer_suspend()`]
-    /// * [`World::defer_resume()`]
-    /// * [`World::is_deferred()`]
-    pub fn defer_begin(&self) -> bool {
-        unsafe { sys::ecs_defer_begin(self.raw_world.as_ptr()) }
-    }
-
-    /// Ends a block of operations to defer.
-    ///
-    /// This should follow a [`World::defer_begin()`] call.
-    ///
-    /// # Thread Safety
-    /// This operation is thread safe.
-    ///
-    /// # Returns
-    /// Whether the operation was successful.
-    ///
-    /// # Example
-    ///
-    /// see [`World::defer_begin`]
-    ///
-    /// # See also
-    ///
-    /// * [`World::defer()`]
-    /// * [`World::defer_begin()`]
-    /// * [`World::defer_suspend()`]
-    /// * [`World::defer_resume()`]
-    /// * [`World::is_deferred()`]
-    pub fn defer_end(&self) -> bool {
-        unsafe { sys::ecs_defer_end(self.raw_world.as_ptr()) }
-    }
-
-    /// Test whether deferring is enabled.
-    ///
-    /// # Returns
-    ///
-    /// Whether deferring is enabled.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use flecs_ecs::prelude::*;
-    ///
-    /// let world = World::new();
-    ///
-    /// assert!(!world.is_deferred());
-    ///
-    /// world.defer_begin();
-    ///
-    /// assert!(world.is_deferred());
-    ///
-    /// world.defer_end();
-    ///
-    /// assert!(!world.is_deferred());
-    /// ```
-    ///
-    /// # See also
-    ///
-    /// * [`World::defer()`]
-    /// * [`World::defer_begin()`]
-    /// * [`World::defer_end()`]
-    /// * [`World::defer_suspend()`]
-    /// * [`World::defer_resume()`]
-    pub fn is_deferred(&self) -> bool {
-        unsafe { sys::ecs_is_deferred(self.raw_world.as_ptr()) }
-    }
-
-    /// Test if deferring is suspended for the current stage
-    /// (see [`World::defer_suspend()`]).
-    pub fn is_defer_suspended(&self) -> bool {
-        unsafe { sys::ecs_is_defer_suspended(self.raw_world.as_ptr()) }
-    }
-
-    /// Defers all operations executed in the passed-in closure.
-    ///
-    /// # Arguments
-    ///
-    /// * `func` - The closure to execute.
-    ///
-    /// # Examples
-    /// ```
-    /// # use flecs_ecs::core::World;
-    /// # let world = World::new();
-    /// let return_something_if_wanted = world.defer(|| {
-    ///     // deferred operations here
-    /// });
-    /// ```
-    ///
-    /// # See also
-    ///
-    /// * [`World::defer_begin()`]
-    /// * [`World::defer_end()`]
-    /// * [`World::defer_suspend()`]
-    /// * [`World::defer_resume()`]
-    /// * [`World::is_deferred()`]
-    pub fn defer<T>(&self, func: impl FnOnce() -> T) -> T {
-        unsafe {
-            sys::ecs_defer_begin(self.raw_world.as_ptr());
+    pub fn defer<T>(&self, func: impl FnOnce(WorldRef<'_>) -> T) -> T {
+        let world = self.raw_world.as_ptr();
+        // SAFETY: `world` is this world's live pointer.
+        if unsafe { sys::ecs_is_stage(world) } {
+            return func(self.world());
         }
-        let result = func();
-        unsafe {
-            sys::ecs_defer_end(self.raw_world.as_ptr());
+        let stage = self.stage(0);
+        // SAFETY: as above.
+        let readonly = unsafe { sys::ecs_stage_is_readonly(world) };
+        struct Merge(*mut sys::ecs_world_t, bool);
+        impl Drop for Merge {
+            fn drop(&mut self) {
+                if !self.1 {
+                    // SAFETY: self.0 is stage 0 of a live world that is not readonly.
+                    unsafe { sys::ecs_merge(self.0) };
+                }
+            }
         }
-        result
-    }
-
-    /// Suspends deferring of operations but do flush the queue.
-    ///
-    /// This operation can be used to do an undeferred operation
-    /// while not flushing the operations in the queue.
-    ///
-    /// An application should invoke [`World::defer_resume()`] before
-    /// [`World::defer_end()`] is called. The operation may only be called
-    /// when deferring is enabled.
-    ///
-    /// # See also
-    ///
-    /// * [`World::defer()`]
-    /// * [`World::defer_begin()`]
-    /// * [`World::defer_end()`]
-    /// * [`World::defer_resume()`]
-    /// * [`World::is_deferred()`]
-    pub fn defer_suspend(&self) {
-        unsafe {
-            sys::ecs_defer_suspend(self.raw_world.as_ptr());
-        }
-    }
-
-    /// Resumes deferring of operations.
-    ///
-    /// # See also
-    ///
-    /// * [`World::defer()`]
-    /// * [`World::defer_begin()`]
-    /// * [`World::defer_end()`]
-    /// * [`World::defer_suspend()`]
-    /// * [`World::is_deferred()`]
-    pub fn defer_resume(&self) {
-        unsafe {
-            sys::ecs_defer_resume(self.raw_world.as_ptr());
-        }
+        let _merge = Merge(stage.world_ptr_mut(), readonly);
+        func(stage)
     }
 
     /// Configure world to have N stages.
@@ -857,8 +743,8 @@ impl World {
     /// stage, except that it does not allow reading from the world.
     ///
     /// Asynchronous stages are never merged automatically, and must therefore be
-    /// manually merged with the [`World::merge()`] function. It is not necessary to call
-    /// [`World::defer_begin()`] or [`World::defer_end()`] before and after enqueuing commands,
+    /// manually merged with the [`World::merge()`] function.
+    /// Operations issued on it are always enqueued,
     /// as an asynchronous stage unconditionally defers operations.
     ///
     /// The application must ensure that no commands are added to the stage while the
@@ -1867,63 +1753,6 @@ impl World {
     /// A scoped world.
     pub fn scope_name(&self, name: &str, f: impl FnMut(&World)) {
         self.scope(EntityView::new_named(self, name).id, f);
-    }
-
-    /// all entities created in function are created with id
-    ///
-    /// # Arguments
-    ///
-    /// * `id`: The id to create entities with.
-    /// * `func`: The function to run.
-    pub fn with(&self, id: impl IntoId, mut func: impl FnMut()) {
-        // SAFETY: raw_world is a valid, live world pointer.
-        let prev: sys::ecs_id_t =
-            unsafe { sys::ecs_set_with(self.raw_world.as_ptr(), *id.into_id(self)) };
-        func();
-        // SAFETY: raw_world is still the same valid world pointer; prev is the value
-        // ecs_set_with returned above, restoring the previous with-id.
-        unsafe {
-            sys::ecs_set_with(self.raw_world.as_ptr(), prev);
-        }
-    }
-
-    /// Entities created in function are created with enum constant
-    ///
-    /// # Type Parameters
-    ///
-    /// * `T`: The enum type.
-    ///
-    /// # Arguments
-    ///
-    /// * `enum_value`: The enum value to give the entity.
-    /// * `func`: The function to run.
-    pub fn with_enum<T>(&self, enum_value: T, func: impl FnMut())
-    where
-        T: ComponentId + ComponentType<Enum> + EnumComponentInfo,
-    {
-        self.with(enum_value.id_variant(self), func);
-    }
-
-    /// Entities created in function are created with enum tag pair
-    ///
-    /// # Type Parameters
-    ///
-    /// * `First`: The first element of the pair.
-    /// * `Second`: The enum component type.
-    ///
-    /// # Arguments
-    ///
-    /// * `enum_value`: The enum value to give the entity.
-    /// * `func`: The function to run.
-    pub fn with_enum_pair<First, Second>(&self, enum_value: Second, func: impl FnMut())
-    where
-        First: ComponentId,
-        Second: ComponentId + ComponentType<Enum> + EnumComponentInfo,
-    {
-        self.with(
-            ecs_pair(First::entity_id(self), **(enum_value.id_variant(self))),
-            func,
-        );
     }
 
     /// Delete all entities with the given id

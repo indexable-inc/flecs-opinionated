@@ -184,7 +184,7 @@ impl<'a, T: ComponentId> EventBuilder<'a, T> {
         desc.observable = world.real_world().world_ptr_mut() as *mut c_void;
         unsafe {
             let world_ptr = world.world_ptr_mut();
-            let deferred = sys::ecs_is_deferred(world_ptr);
+            let deferred = sys::ecs_is_stage(world_ptr); // ecs_enqueue defers exactly on a stage
             sys::ecs_enqueue(world_ptr, desc);
             if !T::IS_TAG {
                 if deferred {

@@ -315,11 +315,11 @@ unsafe extern "C" {
     pub fn ecs_remove_id(world: *mut ecs_world_t, entity: ecs_entity_t, id: ecs_id_t);
     pub fn ecs_is_enabled_id(world: *const ecs_world_t, entity: ecs_entity_t, id: ecs_id_t)
     -> bool;
-    /// Whether the world cannot be written straight away: a stage, a world in readonly mode (in a system or
-    /// observer), or, on a host's 4.1.6, a deferred world (csrc/glue.c).
+    /// Whether the world cannot be written straight away: a stage, or a world in readonly mode (in a system or
+    /// observer) (csrc/glue.c).
     pub fn glue_is_deferred(world: *const ecs_world_t) -> bool;
-    /// Starts a batch of writes, applied together by `glue_batch_end`; returns the world to write the batch to (Flecs
-    /// past 4.1.6 has no defer mode, so this is stage 0 there).
+    /// Starts a batch of writes, applied together by `glue_batch_end`; returns the world to write the batch to (stage
+    /// 0: Flecs master has no defer mode).
     pub fn glue_batch_begin(world: *mut ecs_world_t) -> *mut ecs_world_t;
     pub fn glue_batch_end(world: *mut ecs_world_t, batch: *mut ecs_world_t);
     pub fn ecs_get_mut_id(

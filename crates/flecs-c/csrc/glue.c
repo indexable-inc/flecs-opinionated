@@ -100,44 +100,25 @@ int32_t glue_with(const ecs_world_t *world, ecs_id_t id, ecs_entity_t *out, int3
     return n;
 }
 
-/* Flecs past 4.1.6 (this repo's pin, vendor/flecs/SOURCE.md) has no defer mode: operations queue only on a stage and
- * apply when it is merged, and ecs_is_deferred, ecs_defer_begin and ecs_defer_end are gone. A host's Flecs (the space
- * game's 4.1.6, SPEC.md "Host worlds") still has them. EcsIdOnInstantiateCopy is new with the rename of
- * (OnInstantiate, Override) to (OnInstantiate, Copy), after the defer API went, so it tells the two apart. */
-#ifdef EcsIdOnInstantiateCopy
-#define GLUE_NO_DEFER
-#endif
+/* Flecs master has no defer mode: operations queue only on a stage and apply when it is merged. Host worlds link the
+ * same Flecs (crates/flecs_ecs_sys), so there is no 4.1.6 variant any more. */
 
 /* Whether `world` cannot be written straight away: a stage, or a world in readonly mode (a system or observer is
- * running), or, on 4.1.6, a world in defer mode. */
+ * running). */
 bool glue_is_deferred(const ecs_world_t *world) {
-#ifdef GLUE_NO_DEFER
     return ecs_is_stage(world) || ecs_stage_is_readonly(world);
-#else
-    return ecs_is_deferred(world);
-#endif
 }
 
 /* Starts a batch of writes that apply together at glue_batch_end, so an entity moves to its final table once. Returns
- * the world to write the batch to (stage 0 past 4.1.6; the world itself, deferred, on 4.1.6). Reads go to `world`. */
+ * the world to write the batch to (stage 0). Reads go to `world`. */
 ecs_world_t *glue_batch_begin(ecs_world_t *world) {
-#ifdef GLUE_NO_DEFER
     return ecs_get_stage(world, 0);
-#else
-    ecs_defer_begin(world);
-    return world;
-#endif
 }
 
 /* Applies the batch glue_batch_begin returned. */
 void glue_batch_end(ecs_world_t *world, ecs_world_t *batch) {
-#ifdef GLUE_NO_DEFER
     (void)world;
     ecs_merge(batch);
-#else
-    (void)batch;
-    ecs_defer_end(world);
-#endif
 }
 
 /* A value being written from Rust: a default-constructed value of one type (ecs_value_new, so its hooks run) and a

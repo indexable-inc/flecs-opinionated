@@ -201,7 +201,7 @@ where
     Self: WorldProvider<'a>,
 {
     fn entity(&self) -> EntityView<'_> {
-        let world = unsafe { WorldRef::from_ptr(self.iter.real_world) };
+        let world = unsafe { WorldRef::from_ptr(self.iter.world) };
         EntityView::new_from(world, unsafe {
             sys::ecs_get_entity(self.iter.query as *const c_void)
         })
@@ -224,7 +224,7 @@ where
     T: QueryTuple,
 {
     fn world(&self) -> WorldRef<'a> {
-        unsafe { WorldRef::from_ptr(self.iter.world) }
+        unsafe { WorldRef::from_ptr(self.iter.stage) }
     }
 }
 
@@ -380,7 +380,7 @@ where
     Self: WorldProvider<'a>,
 {
     fn entity(&self) -> EntityView<'_> {
-        let world = unsafe { WorldRef::from_ptr((*self.parent.get()).real_world) };
+        let world = unsafe { WorldRef::from_ptr((*self.parent.get()).world) };
         EntityView::new_from(world, unsafe {
             sys::ecs_get_entity((*self.parent.get()).query as *const core::ffi::c_void)
         })
@@ -403,6 +403,6 @@ where
     T: QueryTuple,
 {
     fn world(&self) -> WorldRef<'a> {
-        unsafe { WorldRef::from_ptr((*self.parent.get()).world) }
+        unsafe { WorldRef::from_ptr((*self.parent.get()).stage) }
     }
 }

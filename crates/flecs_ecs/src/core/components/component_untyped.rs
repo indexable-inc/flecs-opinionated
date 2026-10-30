@@ -48,9 +48,6 @@ impl<'a> UntypedComponent<'a> {
             parent: 0,
             symbol: core::ptr::null(),
             use_low_id: true,
-            add: core::ptr::null(),
-            add_expr: core::ptr::null(),
-            set: core::ptr::null(),
         };
         // SAFETY: world.world_ptr_mut() comes from the live world reference
         // passed in, and desc is a fully initialized ecs_entity_desc_t with a
@@ -80,9 +77,6 @@ impl<'a> UntypedComponent<'a> {
             parent: 0,
             symbol: core::ptr::null(),
             use_low_id: true,
-            add: core::ptr::null(),
-            add_expr: core::ptr::null(),
-            set: core::ptr::null(),
         };
         // SAFETY: world.world_ptr_mut() comes from the live world reference
         // passed in, and desc is a fully initialized ecs_entity_desc_t whose

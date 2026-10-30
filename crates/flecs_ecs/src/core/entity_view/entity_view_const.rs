@@ -7,7 +7,6 @@ use core::{
 use crate::sys;
 use flecs_ecs::core::*;
 use flecs_ecs_derive::extern_abi;
-use sys::ecs_get_with;
 
 #[cfg(feature = "std")]
 extern crate std;
@@ -183,7 +182,7 @@ impl<'a> EntityView<'a> {
     pub(crate) fn new(world: impl WorldProvider<'a>) -> Self {
         let world_ptr = world.world_ptr_mut();
         assert_not_in_multithreaded_phase(world_ptr);
-        let id = if unsafe { sys::ecs_get_scope(world_ptr) == 0 && ecs_get_with(world_ptr) == 0 } {
+        let id = if unsafe { sys::ecs_get_scope(world_ptr) == 0 } {
             unsafe { sys::ecs_new(world_ptr) }
         } else {
             let desc = sys::ecs_entity_desc_t::default();
@@ -272,9 +271,6 @@ impl<'a> EntityView<'a> {
             parent: 0,
             symbol: core::ptr::null(),
             use_low_id: false,
-            add: core::ptr::null(),
-            add_expr: core::ptr::null(),
-            set: core::ptr::null(),
         };
         let id = unsafe { sys::ecs_entity_init(world.world_ptr_mut(), &desc) };
         Self {
@@ -382,9 +378,6 @@ impl<'a> EntityView<'a> {
             parent: 0,
             symbol: core::ptr::null(),
             use_low_id: false,
-            add: core::ptr::null(),
-            add_expr: core::ptr::null(),
-            set: core::ptr::null(),
         };
         let id = unsafe { sys::ecs_entity_init(world.world_ptr_mut(), &desc) };
         Self {
@@ -404,9 +397,6 @@ impl<'a> EntityView<'a> {
             parent: 0,
             symbol: core::ptr::null(),
             use_low_id: false,
-            add: core::ptr::null(),
-            add_expr: core::ptr::null(),
-            set: core::ptr::null(),
         };
         let id = unsafe { sys::ecs_entity_init(world.world_ptr_mut(), &desc) };
         Self {
@@ -501,8 +491,8 @@ impl<'a> EntityView<'a> {
     /// let entity = world.entity();
     /// assert!(entity.is_alive());
     ///
-    /// world.defer(|| {
-    ///     entity.destruct(); // Deferred deletion
+    /// world.defer(|stage| {
+    ///     entity.mut_current_stage(stage).destruct(); // Deferred deletion
     ///     assert!(entity.is_alive()); // still alive since deferred
     /// });
     ///
@@ -914,7 +904,7 @@ impl<'a> EntityView<'a> {
             return None;
         }
 
-        NonNull::new(unsafe { sys::ecs_record_find(self.world.world_ptr(), *self.id) }).and_then(
+        NonNull::new(unsafe { sys::ecs_rust_record_find(self.world.world_ptr(), *self.id) }).and_then(
             |record| {
                 let table = NonNull::new(unsafe { (*record.as_ptr()).table })?;
                 Some(unsafe {
@@ -1254,6 +1244,22 @@ impl<'a> EntityView<'a> {
         unsafe { sys::ecs_iter_count(&mut it) as u32 }
     }
 
+    /// The children of this entity in their stored order (`ecs_get_ordered_children`).
+    ///
+    /// The order is the one [`EntityView::set_child_order`] set, or creation order. Flecs keeps an order for a
+    /// parent with the `OrderedChildren` trait and for the children of a [`flecs::Parent`] hierarchy; on any
+    /// other parent Flecs asserts (use [`EntityView::each_child`] there).
+    pub fn ordered_children(self) -> Vec<Entity> {
+        // SAFETY: the world pointer is valid for 'a; the returned array is owned by Flecs and copied out before any
+        // other operation can change it.
+        let children = unsafe { sys::ecs_get_ordered_children(self.world_ptr(), *self.id) };
+        if children.ids.is_null() || children.count <= 0 {
+            return Vec::new();
+        }
+        // SAFETY: `ids` points to `count` entity ids; Entity is repr(transparent) over u64.
+        unsafe { core::slice::from_raw_parts(children.ids as *const Entity, children.count as usize) }.to_vec()
+    }
+
     /// Returns the count of targets for a given relationship id.
     ///
     /// # Arguments
@@ -1312,7 +1318,7 @@ pub trait EntityViewGet<'a, Return>: WorldProvider<'a> + Sized {
     /// - This will panic if within the callback you do any operation that could invalidate the reference.
     ///   This happens when the entity is moved to a different table in memory. Such as adding, removing components or
     ///   creating/deleting entities where the entity belongs to the same table (which could cause a table grow operation).
-    ///   In case you need to do such operations, you can either do it after the get operation or defer the world with `world.defer_begin()`.
+    ///   In case you need to do such operations, you can either do it after the get operation or issue them through a stage with `world.defer(|stage| ...)`.
     ///
     /// # Returns
     ///
@@ -1391,7 +1397,7 @@ pub trait EntityViewGet<'a, Return>: WorldProvider<'a> + Sized {
     /// - This will panic if within the callback you do any operation that could invalidate the reference.
     ///   This happens when the entity is moved to a different table in memory. Such as adding, removing components or
     ///   creating/deleting entities where the entity belongs to the same table (which could cause a table grow operation).
-    ///   In case you need to do such operations, you can either do it after the get operation or defer the world with `world.defer_begin()`.
+    ///   In case you need to do such operations, you can either do it after the get operation or issue them through a stage with `world.defer(|stage| ...)`.
     ///
     /// - `get` assumes when not using `Option` wrapper, that the entity has the component.
     ///   This will panic if the entity does not have the component. If unsure, use `Option` wrapper or `try_get` function instead.
@@ -1452,7 +1458,7 @@ impl<'a, Return> EntityViewGet<'a, Return> for EntityView<'a> {
             return None;
         }
 
-        let record = unsafe { sys::ecs_record_find(self.world.world_ptr(), *self.id) };
+        let record = unsafe { sys::ecs_rust_record_find(self.world.world_ptr(), *self.id) };
 
         if record.is_null() {
             return None;
@@ -1487,7 +1493,10 @@ impl<'a, Return> EntityViewGet<'a, Return> for EntityView<'a> {
 
             #[cfg(not(feature = "flecs_safety_locks"))]
             {
-                let _defer_guard = DeferGuard::new(self.world);
+                // Flecs master: no implicit defer; lock the table like C++'s invoke_get, so a
+                // structural change to it in the callback asserts (debug builds).
+                // SAFETY: record is live for self.id; the guard unlocks before returning.
+                let _table_lock = unsafe { TableLockGuard::lock(self.world.world_ptr_mut(), (*record).table) };
                 let ret = callback(tuple);
                 return Some(ret);
             }
@@ -1502,7 +1511,7 @@ impl<'a, Return> EntityViewGet<'a, Return> for EntityView<'a> {
             self.id
         );
 
-        let record = unsafe { sys::ecs_record_find(self.world.world_ptr(), *self.id) };
+        let record = unsafe { sys::ecs_rust_record_find(self.world.world_ptr(), *self.id) };
 
         assert!(
             !record.is_null(),
@@ -1526,7 +1535,10 @@ impl<'a, Return> EntityViewGet<'a, Return> for EntityView<'a> {
 
         #[cfg(not(feature = "flecs_safety_locks"))]
         {
-            let _defer_guard = DeferGuard::new(self.world);
+            // Flecs master: no implicit defer; lock the table like C++'s invoke_get, so a
+                // structural change to it in the callback asserts (debug builds).
+                // SAFETY: record is live for self.id; the guard unlocks before returning.
+                let _table_lock = unsafe { TableLockGuard::lock(self.world.world_ptr_mut(), (*record).table) };
             callback(tuple)
         }
     }
@@ -1597,7 +1609,7 @@ impl<'a> EntityView<'a> {
             self.id
         );
 
-        let record = unsafe { sys::ecs_record_find(self.world.world_ptr(), *self.id) };
+        let record = unsafe { sys::ecs_rust_record_find(self.world.world_ptr(), *self.id) };
 
         assert!(
             !record.is_null(),
@@ -1690,7 +1702,7 @@ impl<'a> EntityView<'a> {
             return None;
         }
 
-        let record = unsafe { sys::ecs_record_find(self.world.world_ptr(), *self.id) };
+        let record = unsafe { sys::ecs_rust_record_find(self.world.world_ptr(), *self.id) };
 
         if record.is_null() {
             return None;
@@ -2483,8 +2495,8 @@ impl EntityView<'_> {
     ///     height: i32,
     /// }
     ///
-    /// world.defer(|| {
-    ///     entity.enqueue(Resize {
+    /// world.defer(|stage| {
+    ///     entity.mut_current_stage(stage).enqueue(Resize {
     ///         width: 10,
     ///         height: 20,
     ///     });
@@ -2745,7 +2757,7 @@ impl EntityView<'_> {
             let empty = &mut *(empty as *mut Func);
 
             // SAFETY: iter's world and table pointers are valid for the duration of the callback.
-            let _table_lock = TableLockGuard::lock((*iter).world, (*iter).table);
+            let _table_lock = TableLockGuard::lock((*iter).stage, (*iter).table);
 
             // Entity observers match on a non-$this source, so iter.count is
             // 0; invoke once per event instead of once per table row.
@@ -2769,11 +2781,11 @@ impl EntityView<'_> {
             let empty = &mut *(empty as *mut Func);
 
             // SAFETY: iter's world and table pointers are valid for the duration of the callback.
-            let _table_lock = TableLockGuard::lock((*iter).world, (*iter).table);
+            let _table_lock = TableLockGuard::lock((*iter).stage, (*iter).table);
 
             // Entity observers match on a non-$this source, so iter.count is
             // 0; invoke once per event instead of once per table row.
-            let world = WorldRef::from_ptr((*iter).world);
+            let world = WorldRef::from_ptr((*iter).stage);
             empty(&mut EntityView::new_from(
                 world,
                 sys::ecs_field_src(iter, 0),
@@ -2797,7 +2809,7 @@ impl EntityView<'_> {
             let empty = &mut *(empty as *mut Func);
 
             // SAFETY: iter's world and table pointers are valid for the duration of the callback.
-            let _table_lock = TableLockGuard::lock((*iter).world, (*iter).table);
+            let _table_lock = TableLockGuard::lock((*iter).stage, (*iter).table);
 
             // Entity observers match on a non-$this source, so iter.count is
             // 0; invoke once per event instead of once per table row.
@@ -2823,13 +2835,13 @@ impl EntityView<'_> {
             let empty = &mut *(empty as *mut Func);
 
             // SAFETY: iter's world and table pointers are valid for the duration of the callback.
-            let _table_lock = TableLockGuard::lock((*iter).world, (*iter).table);
+            let _table_lock = TableLockGuard::lock((*iter).stage, (*iter).table);
 
             // Entity observers match on a non-$this source, so iter.count is
             // 0; invoke once per event instead of once per table row.
             let data = (*iter).param as *mut C;
             let data_ref = &mut *data;
-            let world = WorldRef::from_ptr((*iter).world);
+            let world = WorldRef::from_ptr((*iter).stage);
             empty(
                 &mut EntityView::new_from(world, sys::ecs_field_src(iter, 0)),
                 data_ref,
@@ -2879,31 +2891,9 @@ impl EntityView<'_> {
     }
 }
 
-/// Calls `defer_begin` on construction and `defer_end` on drop, so the defer
-/// block is closed even when the user callback unwinds.
-#[cfg(not(feature = "flecs_safety_locks"))]
-struct DeferGuard<'w> {
-    world: WorldRef<'w>,
-}
-
-#[cfg(not(feature = "flecs_safety_locks"))]
-impl<'w> DeferGuard<'w> {
-    fn new(world: WorldRef<'w>) -> Self {
-        world.defer_begin();
-        Self { world }
-    }
-}
-
-#[cfg(not(feature = "flecs_safety_locks"))]
-impl Drop for DeferGuard<'_> {
-    fn drop(&mut self) {
-        self.world.defer_end();
-    }
-}
-
 /// Locks a table on construction and unlocks it on drop, so the table is
 /// unlocked even when the user callback unwinds.
-struct TableLockGuard {
+pub(crate) struct TableLockGuard {
     world: *mut sys::ecs_world_t,
     table: *mut sys::ecs_table_t,
 }
@@ -2912,7 +2902,7 @@ impl TableLockGuard {
     /// # Safety
     ///
     /// `world` and `table` must be valid pointers for the lifetime of the guard.
-    unsafe fn lock(world: *mut sys::ecs_world_t, table: *mut sys::ecs_table_t) -> Self {
+    pub(crate) unsafe fn lock(world: *mut sys::ecs_world_t, table: *mut sys::ecs_table_t) -> Self {
         unsafe { sys::ecs_table_lock(world, table) };
         Self { world, table }
     }

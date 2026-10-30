@@ -295,27 +295,6 @@ impl<'a> EntityView<'a> {
         self.depends_on(enum_value.id_variant(world))
     }
 
-    /// Shortcut for `add_id((flecs::SlotOf::ID, entity))`.
-    ///
-    /// # Arguments
-    ///
-    /// * `second`: The second element of the pair.
-    pub fn slot_of(self, second: impl IntoEntity) -> Self {
-        // SAFETY: SlotOf is a builtin tag relationship (PairIsTag), so the pair adds no component data.
-        unsafe { self.add_id_unchecked((ECS_SLOT_OF, second.into_entity(self.world))) }
-    }
-
-    /// Shortcut for `add_id((flecs::SlotOf::ID, target(ChildOf)))`.
-    pub fn slot(self) -> Self {
-        ecs_assert!(
-            self.target(flecs::ChildOf::ID, 0).is_some(),
-            FlecsErrorCode::InvalidParameter,
-            "add ChildOf pair before using slot()"
-        );
-        let id = self.target(ECS_CHILD_OF, 0);
-        self.slot_of(id.expect("ChildOf pair not found"))
-    }
-
     /// Mark id for auto-overriding.
     ///
     /// When an entity inherits from a base entity (using the `IsA` relationship)
@@ -995,64 +974,6 @@ impl<'a> EntityView<'a> {
         self
     }
 
-    /// Entities created in the function will have the current entity.
-    /// This operation is thread safe.
-    ///
-    /// # Arguments
-    ///
-    /// - `func`: The function to call.
-    pub fn with(self, func: impl FnOnce()) -> Self {
-        let world = self.world.world_ptr_mut();
-        // SAFETY: the world pointer is valid for 'a; the guard restores the previous
-        // with id even if `func` unwinds.
-        let _guard = RestoreWithGuard {
-            world,
-            prev: unsafe { sys::ecs_set_with(world, *self.id) },
-        };
-        func();
-        self
-    }
-
-    /// Entities created in the function will have a pair consisting of a specified ID and the current entity.
-    /// This operation is thread safe.
-    ///
-    /// # Arguments
-    ///
-    /// - `first`: The first element of the pair.
-    /// - `func`: The function to call.///
-    pub fn with_first(self, first: impl IntoEntity, func: impl FnOnce()) -> Self {
-        let world = self.world.world_ptr_mut();
-        let pair = ecs_pair(*first.into_entity(self.world), *self.id);
-        // SAFETY: the world pointer is valid for 'a; the guard restores the previous
-        // with id even if `func` unwinds.
-        let _guard = RestoreWithGuard {
-            world,
-            prev: unsafe { sys::ecs_set_with(world, pair) },
-        };
-        func();
-        self
-    }
-
-    /// Entities created in the function will have a pair consisting of the current entity and a specified ID.
-    /// This operation is thread safe.
-    ///
-    /// # Arguments
-    ///
-    /// - `second`: The second element of the pair.
-    /// - `func`: The function to call.
-    pub fn with_second(self, second: impl IntoEntity, func: impl FnOnce()) -> Self {
-        let world = self.world.world_ptr_mut();
-        let pair = ecs_pair(*self.id, *second.into_entity(self.world));
-        // SAFETY: the world pointer is valid for 'a; the guard restores the previous
-        // with id even if `func` unwinds.
-        let _guard = RestoreWithGuard {
-            world,
-            prev: unsafe { sys::ecs_set_with(world, pair) },
-        };
-        func();
-        self
-    }
-
     /// The function will be ran with the scope set to the current entity.
     ///
     /// # Arguments
@@ -1214,21 +1135,6 @@ impl<'a> EntityView<'a> {
             sys::ecs_set_child_order(world_ptr, *self.id, children_ptr, child_count);
         }
         self
-    }
-}
-
-struct RestoreWithGuard {
-    world: *mut sys::ecs_world_t,
-    prev: sys::ecs_id_t,
-}
-
-impl Drop for RestoreWithGuard {
-    fn drop(&mut self) {
-        // SAFETY: `world` is a live world pointer captured from the `WorldRef` of the
-        // function that created this guard, which is still borrowed for 'a.
-        unsafe {
-            sys::ecs_set_with(self.world, self.prev);
-        }
     }
 }
 

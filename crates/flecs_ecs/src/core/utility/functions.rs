@@ -426,7 +426,7 @@ pub(crate) fn assign_helper<T: ComponentId>(
     }
 
     if !res.stage.is_null() {
-        unsafe { sys::flecs_defer_end(res.world, res.stage) };
+        unsafe { sys::flecs_commands_end(res.world, res.stage) };
     }
 
     if res.call_modified {

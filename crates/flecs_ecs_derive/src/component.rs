@@ -238,7 +238,6 @@ pub(crate) fn collect_flecs_traits_calls(
             "IsA",
             "ChildOf",
             "DependsOn",
-            "SlotOf",
             "OnInstantiate",
             "OnDelete",
             "OnDeleteTarget",
@@ -310,8 +309,9 @@ pub(crate) fn collect_flecs_traits_calls(
                                             .is_some_and(|s| s.ident == "OnInstantiate")
                                         {
                                             let policy = p2.segments.last().and_then(|s| {
-                                                if s.ident == "Override" {
-                                                    Some(quote! { Override })
+                                                // Flecs master renamed Override to Copy; both are accepted.
+                                                if s.ident == "Copy" || s.ident == "Override" {
+                                                    Some(quote! { Copy })
                                                 } else if s.ident == "Inherit" {
                                                     Some(quote! { Inherit })
                                                 } else if s.ident == "DontInherit" {

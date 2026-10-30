@@ -51,11 +51,15 @@
 
 mod script_builder;
 mod script_entity_view;
+#[cfg(feature = "flecs_script_shell")]
+mod shell;
 mod unmanaged_script;
 mod world;
 
 pub use script_builder::*;
 pub use script_entity_view::*;
+#[cfg(feature = "flecs_script_shell")]
+pub use shell::*;
 pub use unmanaged_script::*;
 
 #[cfg(feature = "std")]

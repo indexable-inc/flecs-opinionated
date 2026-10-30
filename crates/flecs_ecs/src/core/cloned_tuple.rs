@@ -364,7 +364,7 @@ where
             sys::ecs_get_world(world_ref.ptr_mut() as *const c_void) as *mut sys::ecs_world_t
         };
         let entity = <<A::OnlyType as ComponentOrPairId>::First>::entity_id(world);
-        let record = unsafe { sys::ecs_record_find(world_ptr, entity) };
+        let record = unsafe { sys::ecs_rust_record_find(world_ptr, entity) };
         let id = <A::OnlyType as ComponentOrPairId>::get_id(world_ref);
         let mut has_all_components = true;
 
@@ -485,7 +485,7 @@ macro_rules! impl_cloned_tuple {
 
                 $(
                     let entity = <<$t::OnlyType as ComponentOrPairId>::First>::entity_id(world_ref);
-                    let record = unsafe { sys::ecs_record_find(world_ptr, entity) };
+                    let record = unsafe { sys::ecs_rust_record_find(world_ptr, entity) };
                     let id = <$t::OnlyType as ComponentOrPairId>::get_id(world_ref);
 
                     // SAFETY: world_ptr comes from the live world above; record was

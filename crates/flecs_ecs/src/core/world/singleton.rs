@@ -23,7 +23,7 @@ pub trait WorldGet<Return> {
     /// - This will panic if within the callback you do any operation that could invalidate the reference.
     ///   This happens when the entity is moved to a different table in memory. Such as adding, removing components or
     ///   creating/deleting entities where the entity belongs to the same table (which could cause a table grow operation).
-    ///   In case you need to do such operations, you can either do it after the get operation or defer the world with `world.defer_begin()`.
+    ///   In case you need to do such operations, you can either do it after the get operation or issue them through a stage with `world.defer(|stage| ...)`.
     ///
     /// # Returns
     ///
@@ -91,7 +91,7 @@ pub trait WorldGet<Return> {
     /// - This will panic if within the callback you do any operation that could invalidate the reference.
     ///   This happens when the entity is moved to a different table in memory. Such as adding, removing components or
     ///   creating/deleting entities where the entity belongs to the same table (which could cause a table grow operation).
-    ///   In case you need to do such operations, you can either do it after the get operation or defer the world with `world.defer_begin()`.
+    ///   In case you need to do such operations, you can either do it after the get operation or issue them through a stage with `world.defer(|stage| ...)`.
     ///
     /// - `get` assumes when not using `Option` wrapper, that the entity has the component.
     ///   This will panic if the entity does not have the component. If unsure, use `Option` wrapper or `try_get` function instead.
@@ -158,10 +158,8 @@ impl<Return> WorldGet<Return> for World {
 
             #[cfg(not(feature = "flecs_safety_locks"))]
             {
-                self.defer_begin();
-                let ret = callback(tuple);
-                self.defer_end();
-                return Some(ret);
+                // Flecs master removed implicit defer (C++ dropped it too); the callback runs directly.
+                return Some(callback(tuple));
             }
         }
         None
@@ -187,10 +185,8 @@ impl<Return> WorldGet<Return> for World {
 
         #[cfg(not(feature = "flecs_safety_locks"))]
         {
-            self.defer_begin();
-            let ret = callback(tuple);
-            self.defer_end();
-            ret
+            // Flecs master removed implicit defer (C++ dropped it too); the callback runs directly.
+            callback(tuple)
         }
     }
 }

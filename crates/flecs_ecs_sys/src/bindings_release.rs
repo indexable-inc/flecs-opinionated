@@ -10087,6 +10087,10 @@ unsafe extern "C-unwind" {
         component: ecs_id_t,
     ) -> ecs_get_ptr_t;
 }
+unsafe extern "C-unwind" {
+    #[doc = "ecs_record_find() of Flecs 4.1.6, which upstream master removed (its replacement flecs_entities_get asserts that the\n entity is alive and takes no stage): the entity's record, or NULL when the entity is not alive. Accepts a\n stage."]
+    pub fn ecs_rust_record_find(world: *const ecs_world_t, entity: ecs_entity_t) -> *mut ecs_record_t;
+}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct ecs_rust_set_t {

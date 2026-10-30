@@ -590,7 +590,7 @@ fn assert_stage_belongs_to_query_world(
         assert!(
             core::ptr::eq(
                 sys::ecs_get_world(stage_ptr as *const c_void),
-                (*query).real_world as *const sys::ecs_world_t
+                (*query).world as *const sys::ecs_world_t
             ),
             "the world/stage passed to `iter_stage()` belongs to a different world than the query"
         );
@@ -799,7 +799,7 @@ where
 {
     #[inline(always)]
     fn world(&self) -> WorldRef<'a> {
-        unsafe { WorldRef::from_ptr(self.query.as_ref().world) }
+        unsafe { WorldRef::from_ptr(self.query.as_ref().stage) }
     }
 }
 
@@ -823,7 +823,7 @@ where
         unsafe {
             sys::flecs_poly_claim_(query.as_ptr() as *mut c_void);
 
-            let world_ctx = ecs_get_binding_ctx((*query.as_ptr()).world) as *mut WorldCtx;
+            let world_ctx = ecs_get_binding_ctx((*query.as_ptr()).stage) as *mut WorldCtx;
             (*world_ctx).inc_query_ref_count();
             let world_ctx = NonNull::new_unchecked(world_ctx);
 
@@ -872,7 +872,7 @@ where
                 unsafe {
                     let query = NonNull::new_unchecked((*query_poly).poly as *mut sys::ecs_query_t);
                     sys::flecs_poly_claim_(query.as_ptr() as *mut c_void);
-                    let world_ctx = ecs_get_binding_ctx((*query.as_ptr()).world) as *mut WorldCtx;
+                    let world_ctx = ecs_get_binding_ctx((*query.as_ptr()).stage) as *mut WorldCtx;
                     (*world_ctx).inc_query_ref_count();
                     let world_ctx = NonNull::new_unchecked(world_ctx);
 

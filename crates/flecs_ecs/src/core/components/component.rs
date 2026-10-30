@@ -409,7 +409,7 @@ impl<'a, T> Component<'a, T> {
             let on_add = (*ctx).on_add.unwrap();
             let on_add = on_add as *mut Func;
             let on_add = &mut *on_add;
-            let world = WorldRef::from_ptr(iter.world);
+            let world = WorldRef::from_ptr(iter.stage);
             let entity = EntityView::new_from(world, *iter.entities);
             let component = if (iter.ref_fields | iter.up_fields) == 0 {
                 flecs_field::<T>(iter, 0)
@@ -431,7 +431,7 @@ impl<'a, T> Component<'a, T> {
         let on_set = unsafe { (*ctx).on_set.unwrap() };
         let on_set = on_set as *mut Func;
         let on_set = unsafe { &mut *on_set };
-        let world = unsafe { WorldRef::from_ptr(iter.world) };
+        let world = unsafe { WorldRef::from_ptr(iter.stage) };
         let entity = EntityView::new_from(world, unsafe { *iter.entities });
         let component = if (iter.ref_fields | iter.up_fields) == 0 {
             flecs_field::<T>(iter, 0)
@@ -457,7 +457,7 @@ impl<'a, T> Component<'a, T> {
         // `prev` points to unconstructed memory — not a valid Rust value —
         // so the hook is skipped entirely.
         let existed = !iter.other_table.is_null()
-            && unsafe { sys::ecs_table_has_id(iter.real_world, iter.other_table, iter.event_id) };
+            && unsafe { sys::ecs_table_has_id(iter.world, iter.other_table, iter.event_id) };
         if !existed {
             return;
         }
@@ -466,7 +466,7 @@ impl<'a, T> Component<'a, T> {
         let on_replace = unsafe { (*ctx).on_replace.unwrap() };
         let on_replace = on_replace as *mut Func;
         let on_replace = unsafe { &mut *on_replace };
-        let world = unsafe { WorldRef::from_ptr(iter.world) };
+        let world = unsafe { WorldRef::from_ptr(iter.stage) };
         let entity = EntityView::new_from(world, unsafe { *iter.entities });
         let (prev, next) = if (iter.ref_fields | iter.up_fields) == 0 {
             (flecs_field::<T>(iter, 0), flecs_field::<T>(iter, 1))
@@ -493,7 +493,7 @@ impl<'a, T> Component<'a, T> {
             let on_remove = (*ctx).on_remove.unwrap();
             let on_remove = on_remove as *mut Func;
             let on_remove = &mut *on_remove;
-            let world = WorldRef::from_ptr(iter.world);
+            let world = WorldRef::from_ptr(iter.stage);
             let entity = EntityView::new_from(world, *iter.entities);
             let component = if (iter.ref_fields | iter.up_fields) == 0 {
                 flecs_field::<T>(iter, 0)

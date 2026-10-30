@@ -446,7 +446,7 @@ where
         unsafe {
             let mut iter = self.retrieve_iter();
             let mut entity: Option<EntityView> = None;
-            let world_ptr = iter.world;
+            let world_ptr = iter.stage;
             let world = WorldRef::from_ptr(world_ptr);
 
             #[cfg(feature = "flecs_safety_locks")]
@@ -504,7 +504,7 @@ where
         unsafe {
             let mut iter = self.retrieve_iter();
             let mut entity_result: Option<EntityView> = None;
-            let world_ptr = iter.world;
+            let world_ptr = iter.stage;
             let world = WorldRef::from_ptr(world_ptr);
 
             #[cfg(feature = "flecs_safety_locks")]
@@ -1715,8 +1715,8 @@ where
     let iter = unsafe { &mut *iter };
     // SAFETY: callback_ctx was set to &mut func_each of type Func before this callback ran.
     let func = unsafe { &mut *(iter.callback_ctx as *mut Func) };
-    // SAFETY: iter.world is the live world pointer supplied by the C iterator.
-    let world = unsafe { WorldRef::from_ptr(iter.world) };
+    // SAFETY: iter.stage is the live world pointer supplied by the C iterator.
+    let world = unsafe { WorldRef::from_ptr(iter.stage) };
 
     #[cfg(feature = "flecs_safety_locks")]
     {
@@ -1745,7 +1745,7 @@ where
     unsafe {
         let iter = &mut *iter;
         let func = &mut *(iter.callback_ctx as *mut Func);
-        let world = WorldRef::from_ptr(iter.world);
+        let world = WorldRef::from_ptr(iter.stage);
 
         #[cfg(feature = "flecs_safety_locks")]
         {
@@ -1776,7 +1776,7 @@ where
     unsafe {
         let iter = &mut *iter;
         let func = &mut *(iter.callback_ctx as *mut Func);
-        let world = WorldRef::from_ptr(iter.world);
+        let world = WorldRef::from_ptr(iter.stage);
 
         #[cfg(not(feature = "flecs_safety_locks"))]
         {

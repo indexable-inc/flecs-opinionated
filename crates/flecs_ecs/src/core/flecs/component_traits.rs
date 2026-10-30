@@ -533,7 +533,7 @@ impl_component_trait!(OneOf, ECS_ONE_OF);
 ///
 /// | Target | Description |
 /// |--------|-------------|
-/// | [`Override`] | Copy component from base to instance (default) |
+/// | [`Copy`] (old name [`Override`]) | Copy component from base to instance (default) |
 /// | [`Inherit`] | Inherit component from base |
 /// | [`DontInherit`] | Don't inherit (and don't copy) component from base |
 pub mod on_instantiate {
@@ -569,7 +569,7 @@ pub mod on_instantiate {
     /// // Register component with trait. Optional, since this is the default behavior.
     /// world
     ///     .component::<Mass>()
-    ///     .add_trait::<(flecs::OnInstantiate, flecs::Override)>();
+    ///     .add_trait::<(flecs::OnInstantiate, flecs::Copy)>();
     ///
     /// let base = world.entity().set(Mass { value: 100.0 });
     /// let inst = world.entity().is_a(base); // Mass is copied to inst
@@ -578,9 +578,12 @@ pub mod on_instantiate {
     /// assert!(base.cloned::<&Mass>() == inst.cloned::<&Mass>());
     /// ```
     #[derive(Debug, Default, Clone)]
-    pub struct Override;
+    pub struct Copy;
 
-    impl_component_trait!(Override, ECS_OVERRIDE);
+    impl_component_trait!(Copy, ECS_COPY);
+
+    /// Old name of [`Copy`]: Flecs master renamed the `(OnInstantiate, Override)` target to `(OnInstantiate, Copy)`.
+    pub type Override = Copy;
 
     /// Components with the `Inherit` trait are inherited from a base entity (the `IsA` target) on instantiation.
     /// Inherited components are not copied to the instance, and are only stored once in memory. Operations such as

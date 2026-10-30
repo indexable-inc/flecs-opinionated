@@ -487,3 +487,15 @@ size_t ecs_rust_sizeof_ecs_stack_t(void) {
 size_t ecs_rust_sizeof_ecs_stack_cursor_t(void) {
     return sizeof(ecs_stack_cursor_t);
 }
+
+ecs_record_t* ecs_rust_record_find(
+    const ecs_world_t *world,
+    ecs_entity_t entity)
+{
+    ecs_check(world != NULL, ECS_INVALID_PARAMETER, NULL);
+    ecs_check(entity != 0, ECS_INVALID_PARAMETER, NULL);
+    world = ecs_get_world(world);
+    return flecs_entities_try(world, entity);
+error:
+    return NULL;
+}

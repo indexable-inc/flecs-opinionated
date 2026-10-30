@@ -227,15 +227,15 @@ impl<'a> TableRange<'a> {
 
 /// RAII guard providing read access to the entity ids of a table (range).
 ///
-/// While the guard is alive, the world is kept in deferred mode: structural
-/// changes (creating, deleting or moving entities) are queued and applied when
-/// the guard is dropped, so the entity array cannot be reallocated or freed
-/// while it is borrowed.
+/// While the guard is alive the table is locked (`ecs_table_lock`, as Flecs C++ does since Flecs master removed
+/// implicit defer): a structural change to the table (creating, deleting or moving its entities) asserts in debug
+/// builds. It is not queued; issue such changes through a stage (`World::defer`) instead.
 ///
 /// Dereferences to `&[Entity]`.
 pub struct TableEntities<'a> {
     slice: &'a [Entity],
     world: WorldRef<'a>,
+    table: *mut sys::ecs_table_t,
 }
 
 impl core::ops::Deref for TableEntities<'_> {
@@ -249,25 +249,21 @@ impl core::ops::Deref for TableEntities<'_> {
 
 impl Drop for TableEntities<'_> {
     fn drop(&mut self) {
-        self.world.defer_end();
+        // SAFETY: the table was locked by `entities` and outlives the guard.
+        unsafe { sys::ecs_table_unlock(self.world.world_ptr_mut(), self.table) };
     }
 }
 
 /// RAII guard providing mutable access to a table column (component array).
 ///
-/// While the guard is alive, the world is kept in deferred mode: structural
-/// changes (creating, deleting or moving entities) are queued and applied when
-/// the guard is dropped, so the column storage cannot be reallocated or freed
-/// while it is borrowed. When the `flecs_safety_locks` feature (part of the
-/// default features) is enabled, a write lock is additionally held on the
-/// column for the lifetime of the guard: constructing a second guard (or
-/// field accessor) for the same column while one is alive panics instead of
-/// aliasing the `&mut` data.
+/// While the guard is alive the table is locked (`ecs_table_lock`): a structural
+/// change to it asserts in debug builds (Flecs master has no implicit defer).
 ///
 /// Dereferences to `&[T]` / `&mut [T]`.
 pub struct TableColumnMut<'a, T> {
     slice: &'a mut [T],
     world: WorldRef<'a>,
+    locked: *mut sys::ecs_table_t,
     #[cfg(feature = "flecs_safety_locks")]
     table: NonNull<sys::ecs_table_t>,
     #[cfg(feature = "flecs_safety_locks")]
@@ -312,15 +308,15 @@ impl<'a, T> TableColumnMut<'a, T> {
             }
             (stage_id, multithreaded)
         };
-        world.defer_begin();
+        // SAFETY: caller guarantees `_table` is a live table of `world`.
+        unsafe { sys::ecs_table_lock(world.world_ptr_mut(), _table.as_ptr()) };
         // SAFETY: caller guarantees ptr/count describe the column array. The
-        // world stays in deferred mode until this guard is dropped, so the
-        // array cannot be reallocated or freed while the slice is alive, and
-        // the column write lock prevents aliased access through other guards.
+        // table stays locked until this guard is dropped.
         let slice = unsafe { core::slice::from_raw_parts_mut(ptr, count) };
         Self {
             slice,
             world,
+            locked: _table.as_ptr(),
             #[cfg(feature = "flecs_safety_locks")]
             table: _table,
             #[cfg(feature = "flecs_safety_locks")]
@@ -351,7 +347,8 @@ impl<T> core::ops::DerefMut for TableColumnMut<'_, T> {
 
 impl<T> Drop for TableColumnMut<'_, T> {
     fn drop(&mut self) {
-        self.world.defer_end();
+        // SAFETY: locked in `new`; the table outlives the guard.
+        unsafe { sys::ecs_table_unlock(self.world.world_ptr_mut(), self.locked) };
         #[cfg(feature = "flecs_safety_locks")]
         {
             if self.multithreaded {
@@ -391,29 +388,28 @@ pub trait TableOperations<'a>: IntoTable {
     /// For a [`TableRange`] this returns the entities within
     /// `[offset, offset + count)`.
     ///
-    /// The returned guard keeps the world in deferred mode: structural changes
-    /// are queued and applied when the guard is dropped, so the entity array
-    /// stays valid while it is borrowed.
+    /// The returned guard locks the table: a structural change to it asserts
+    /// in debug builds while the guard is alive.
     fn entities(&self) -> TableEntities<'a> {
         let world = self.world();
-        world.defer_begin();
         let table = self.table_ptr_mut();
+        // SAFETY: table_ptr_mut points to the live table backing this range.
+        unsafe { sys::ecs_table_lock(world.world_ptr_mut(), table) };
         // SAFETY: table_ptr_mut points to the live table backing this range.
         let entities = unsafe { sys::ecs_table_entities(table) };
         if entities.is_null() {
-            return TableEntities { slice: &[], world };
+            return TableEntities { slice: &[], world, table };
         }
         // SAFETY: table_ptr_mut points to the live table backing this range.
         let table_count = unsafe { sys::ecs_table_count(table) }.max(0) as usize;
         let offset = (self.offset().max(0) as usize).min(table_count);
         let count = (self.count().max(0) as usize).min(table_count - offset);
         // SAFETY: entities points to `table_count` valid entity ids and
-        // offset + count <= table_count. The world stays in deferred mode
-        // until the guard is dropped, so the array cannot be reallocated or
-        // freed while the slice is alive.
+        // offset + count <= table_count. The table stays locked until the
+        // guard is dropped.
         let slice =
             unsafe { core::slice::from_raw_parts((entities as *const Entity).add(offset), count) };
-        TableEntities { slice, world }
+        TableEntities { slice, world, table }
     }
 
     fn clear_entities(&self) {
@@ -550,11 +546,7 @@ pub trait TableOperations<'a>: IntoTable {
     /// Get mutable access to a components array from the table by component type.
     ///
     /// The returned guard dereferences to `&mut [T]`. While it is alive the
-    /// world is kept in deferred mode (structural changes are queued) and,
-    /// when the `flecs_safety_locks` feature (part of the default features)
-    /// is enabled, a write lock is held on the column: obtaining a second
-    /// mutable guard or field accessor for the same column panics instead of
-    /// aliasing.
+    /// table is locked: a structural change to it asserts in debug builds.
     ///
     /// For a [`TableRange`] the slice covers `[offset, offset + count)`.
     ///

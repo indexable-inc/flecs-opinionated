@@ -599,7 +599,8 @@ pub trait ComponentId: Sized + ComponentInfo + 'static + OnComponentRegistration
 /// `#[flecs(traits((OnInstantiate, ...)))]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnInstantiatePolicy {
-    Override,
+    /// `(OnInstantiate, Copy)`, Flecs master's name for what was `Override`: the instance gets its own copy.
+    Copy,
     Inherit,
     DontInherit,
 }
@@ -617,9 +618,9 @@ pub trait ComponentInfo: Sized {
     /// reflected here.
     const IS_DONT_FRAGMENT: bool = false;
     /// The `OnInstantiate` policy the component declares at compile time via
-    /// `#[flecs(traits((OnInstantiate, Inherit)))]`. Defaults to `Override`,
+    /// `#[flecs(traits((OnInstantiate, Inherit)))]`. Defaults to `Copy`,
     /// matching flecs. Policies added at runtime are not reflected here.
-    const ON_INSTANTIATE: OnInstantiatePolicy = OnInstantiatePolicy::Override;
+    const ON_INSTANTIATE: OnInstantiatePolicy = OnInstantiatePolicy::Copy;
     const NEEDS_DROP: bool = core::mem::needs_drop::<Self>();
     const IMPLS_CLONE: bool;
     const IMPLS_DEFAULT: bool;

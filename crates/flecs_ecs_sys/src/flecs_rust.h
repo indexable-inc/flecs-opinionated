@@ -21,6 +21,14 @@ ecs_get_ptr_t flecs_record_get_mut_id(
     const ecs_record_t *r,
     ecs_id_t component);
 
+/* ecs_record_find() of Flecs 4.1.6, which upstream master removed (its replacement flecs_entities_get asserts that the
+ * entity is alive and takes no stage): the entity's record, or NULL when the entity is not alive. Accepts a
+ * stage. */
+FLECS_API
+ecs_record_t* ecs_rust_record_find(
+    const ecs_world_t *world,
+    ecs_entity_t entity);
+
 typedef struct ecs_rust_set_t {
     void *ptr;
     bool call_modified;

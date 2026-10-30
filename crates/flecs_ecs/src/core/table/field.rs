@@ -1518,7 +1518,7 @@ pub(crate) unsafe fn flecs_field_table_column(
         if src == 0 {
             return (core::ptr::null_mut(), -1);
         }
-        let record = sys::ecs_record_find(it.real_world, src);
+        let record = sys::ecs_rust_record_find(it.world, src);
         if record.is_null() {
             return (core::ptr::null_mut(), -1);
         }
@@ -1526,7 +1526,7 @@ pub(crate) unsafe fn flecs_field_table_column(
         if table.is_null() {
             return (core::ptr::null_mut(), -1);
         }
-        let column = sys::ecs_table_get_column_index(it.real_world, table, *it.ids.add(index));
+        let column = sys::ecs_table_get_column_index(it.world, table, *it.ids.add(index));
         if column < 0 {
             return (core::ptr::null_mut(), -1);
         }
@@ -1571,7 +1571,7 @@ fn ecs_field_fallback<T>(it: &sys::ecs_iter_t, index: i8) -> *mut T {
     #[cfg(any(debug_assertions, feature = "flecs_force_enable_ecs_asserts"))]
     {
         ecs_assert!(
-            (unsafe { sys::ecs_id_get_flags(it.real_world, sys::ecs_field_id(it, index)) }
+            (unsafe { sys::ecs_id_get_flags(it.world, sys::ecs_field_id(it, index)) }
                 & sys::EcsIdSparse)
                 == 0,
             FlecsErrorCode::InvalidOperation,
@@ -1583,7 +1583,7 @@ fn ecs_field_fallback<T>(it: &sys::ecs_iter_t, index: i8) -> *mut T {
     let (table, row) = if src == 0 {
         (it.table, it.offset as usize)
     } else {
-        let record = unsafe { sys::ecs_record_find(it.real_world, src) };
+        let record = unsafe { sys::ecs_rust_record_find(it.world, src) };
         assert!(
             !record.is_null(),
             "ecs_field: no record found for field source entity {src}"
@@ -1723,7 +1723,7 @@ pub(crate) fn flecs_field_with_size(it: &sys::ecs_iter_t, _size: usize, index: i
     #[cfg(any(debug_assertions, feature = "flecs_force_enable_ecs_asserts"))]
     {
         ecs_assert!(
-            (unsafe { sys::ecs_id_get_flags(it.world, sys::ecs_field_id(it, index)) }
+            (unsafe { sys::ecs_id_get_flags(it.stage, sys::ecs_field_id(it, index)) }
                 & sys::EcsIdSparse)
                 == 0,
             FlecsErrorCode::InvalidOperation,
@@ -1735,7 +1735,7 @@ pub(crate) fn flecs_field_with_size(it: &sys::ecs_iter_t, _size: usize, index: i
     let (table, row) = if src == 0 {
         (it.table, it.offset as usize)
     } else {
-        let record = unsafe { sys::ecs_record_find(it.real_world, src) };
+        let record = unsafe { sys::ecs_rust_record_find(it.world, src) };
         assert!(
             !record.is_null(),
             "ecs_field: no record found for field source entity {src}"

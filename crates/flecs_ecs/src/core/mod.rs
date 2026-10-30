@@ -71,6 +71,7 @@ pub use components::*;
 pub use entity::Entity;
 pub use entity_view::EntityView;
 pub use entity_view::EntityViewGet;
+pub(crate) use entity_view::TableLockGuard;
 pub use event::EventBuilder;
 pub use get_tuple::GetTuple;
 pub(crate) use get_tuple::*;

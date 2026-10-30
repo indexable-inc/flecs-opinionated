@@ -327,7 +327,7 @@ pub trait GetTuple: Sized {
                 {
                     let id_underlying_type = world.component_id::<i32>();
                     let pair_id = ecs_pair(flecs::Constant::ID, *id_underlying_type);
-                    let record = unsafe { sys::ecs_record_find(world_ptr, target) };
+                    let record = unsafe { sys::ecs_rust_record_find(world_ptr, target) };
                     let constant_value =
                         unsafe { sys::flecs_record_get_id(world_ptr, target, record, pair_id) };
                     ecs_assert!(
@@ -534,7 +534,7 @@ where
             sys::ecs_get_world(world.world_ptr() as *const c_void) as *mut sys::ecs_world_t
         };
         let entity = <<A::OnlyType as ComponentOrPairId>::First>::entity_id(world);
-        let record = unsafe { sys::ecs_record_find(world_ptr, entity) };
+        let record = unsafe { sys::ecs_rust_record_find(world_ptr, entity) };
         let id =  <A::OnlyType as ComponentOrPairId>::get_id(world);
         let mut has_all_components = true;
 
@@ -680,7 +680,7 @@ macro_rules! impl_get_tuple {
 
                 $(
                     let entity = <<$t::OnlyType as ComponentOrPairId>::First>::entity_id(world_ref);
-                    let record = unsafe { sys::ecs_record_find(world_ptr, entity) };
+                    let record = unsafe { sys::ecs_rust_record_find(world_ptr, entity) };
                     let id = <$t::OnlyType as ComponentOrPairId>::get_id(world_ref);
 
                     // SAFETY: world_ptr comes from the live world above; record was
