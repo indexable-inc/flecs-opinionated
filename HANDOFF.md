@@ -1,5 +1,43 @@
 # Handoff
 
+## Flecs master port (lane FLECS-PORT, 2026-10-29)
+
+**State:** on branch `flecs-master-c73`, not pushed, **never compiled**: this lane wrote code by reading only (no
+cargo, bun, build.py or bake). The integrator builds once and fixes what is left; the list below says where to look.
+
+- **Fork model.** This repository has one Flecs C, `vendor/flecs/distr`, copied unchanged from a pinned commit of
+  [indexable-inc/flecs](https://github.com/indexable-inc/flecs) `master`. That branch is always upstream
+  SanderMertens/flecs `master` plus our open upstream PRs rebased onto it; each PR has its own branch on the fork.
+  No local Flecs C patches. Today the pin is `c73ce7115`, identical to upstream (no open PRs).
+  `uv run scripts/bump_flecs.py --flecs <checkout>` fetches upstream and the fork, rebases the fork's `master`,
+  copies `distr`, regenerates the bindings, records both commits in `vendor/flecs/SOURCE.md` and prints the
+  `git push --force-with-lease fork master` to run after review (it never pushes).
+- **Crates.** `crates/flecs_ecs`, `flecs_ecs_sys` and `flecs_ecs_derive` (Flecs-Rust `bf956db99`) are workspace
+  crates, maintained here; `flecs_ecs_sys` compiles `vendor/flecs/distr`. Their `SOURCE.md` files list every change,
+  and `crates/flecs_ecs/SOURCE.md` "Port to Flecs master" lists the Rust API changes users must make (defer takes
+  the stage, `with`/`slot_of`/`DefaultChildComponent`/`TableIter::to_str` gone, `Override` is `Copy`, get callbacks
+  lock tables instead of deferring; new `ordered_children`, script `reload`/`undo`, the script shell).
+- **Snapshot.** flecs-snapshot saves and restores `Parent` children in their order and `DontFragment` parts on host
+  worlds (SPEC.md, `host-check/tests/hierarchy.rs`).
+- **Integrator: first build.** Regenerate `Cargo.lock` and `host-check/Cargo.lock`. Places most likely not to
+  compile:
+  - `flecs_ecs_sys/src/flecs_rust.c`: master internals (`flecs_entities_try`, `flecs_commands_end`, the `ecs_check`
+    label in `ecs_rust_record_find`), and the hand-added `ecs_rust_record_find` in both bindings files;
+  - `flecs_ecs_sys/build.rs`: the `ALWAYS` defines and the `flecs_safety_locks` `compile_error!`;
+  - `flecs_ecs`: `World::defer` (closure lifetime, `self.world()`), `ScriptEntityView` reaching `self.world`
+    through `Deref`, `addons/script/shell.rs` (`ecs_vec_first` on an empty vec), `flecs::Copy` shadowing
+    `std::marker::Copy` inside `core::flecs`, the `TableLockGuard` re-exports, `TableColumnMut::locked`, and the
+    dead `flecs_safety_locks` cfg code (`safety_map.rs`, `utility/safety.rs`, cfg blocks in `get_tuple.rs`,
+    `cloned_tuple.rs`), which names sys items master does not have;
+  - `flecs-c/csrc/glue.c`: the host defines and `glue_ordered_children` (`flecs_components_get`,
+    `flecs_component_get_flags`); flecs-snapshot `walk.rs` (~579), `host.rs` (~1388, ~1470) and
+    `host-check/tests/hierarchy.rs`;
+  - `scripts/bump_flecs.py`: bindgen doc post-processing; run `--bindings-only` and diff against the commit.
+- **Behaviour to check.** Master locks tables inside OnAdd/OnRemove hooks, and a structural change inside a get
+  callback or table guard is no longer queued (it asserts in debug, and release builds do not check). Observers
+  built without terms match the Any term.
+- **Section below** "Host worlds": its Pin paragraph describes the game's 4.1.6 setup before this lane.
+
 ## Logical types (lane FLECS-LOGICAL, 2026-10-26)
 
 **State:** on main. Described and script types split into a physical layout (decides encoding and Flecs meta) and
