@@ -152,8 +152,8 @@ where
     }
 }
 pub const FLECS_VERSION_MAJOR: u32 = 4;
-pub const FLECS_VERSION_MINOR: u32 = 1;
-pub const FLECS_VERSION_PATCH: u32 = 6;
+pub const FLECS_VERSION_MINOR: u32 = 2;
+pub const FLECS_VERSION_PATCH: u32 = 0;
 pub const FLECS_HI_ID_RECORD_ID: u32 = 1024;
 pub const FLECS_SPARSE_PAGE_BITS: u32 = 6;
 pub const FLECS_ENTITY_PAGE_BITS: u32 = 10;
@@ -5008,7 +5008,7 @@ unsafe extern "C-unwind" {
     ) -> i32;
 }
 unsafe extern "C-unwind" {
-    #[doc = "Remove all entities in a table. Does not deallocate table memory.\n Retaining table memory can be efficient when planning\n to refill the table with operations like ecs_bulk_init().\n\n @param world The world.\n @param table The table to clear."]
+    #[doc = "Delete all entities in a table. The entities are deleted as with\n ecs_delete(), which cleans up relationships and children that refer to them.\n Does not deallocate table memory, unless the cleanup deletes the table (for\n example when the table has a pair with one of its own entities as target).\n Retaining table memory can be efficient when planning to refill the table\n with operations like ecs_bulk_init().\n\n @param world The world.\n @param table The table to clear."]
     pub fn ecs_table_clear_entities(world: *mut ecs_world_t, table: *mut ecs_table_t);
 }
 unsafe extern "C-unwind" {
@@ -7581,13 +7581,13 @@ unsafe extern "C-unwind" {
     #[doc = "Units module import function.\n Usage:\n @code\n ECS_IMPORT(world, FlecsUnits)\n @endcode\n\n @param world The world."]
     pub fn FlecsUnitsImport(world: *mut ecs_world_t);
 }
-#[doc = "Result of running a command."]
+#[doc = "Result of running a command line."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct ecs_shell_result_t {
-    #[doc = "Value returned by the command. Empty when the command has no return\n value or failed. Commands that edit script code are the exception: when\n the edit was applied but reloading the script failed, the result is set\n together with the errors of the reload."]
-    pub result: ecs_value_t,
-    #[doc = "Errors logged while the command ran, one entry per error (vec<char*>)."]
+    #[doc = "Values returned by the commands that ran, one entry per command in the\n order of the command line (vec<ecs_value_t>). The last entry belongs to\n the command that failed, if any. An entry is empty when the command has\n no return value or failed. Commands that edit script code are the\n exception: when the edit was applied but reloading the script failed,\n the entry is set together with the errors of the reload."]
+    pub results: ecs_vec_t,
+    #[doc = "Errors logged while the commands ran, one entry per error (vec<char*>)."]
     pub errors: ecs_vec_t,
 }
 #[doc = "Resource created by a command, see ecs_shell_resource_create()."]
@@ -7807,7 +7807,7 @@ unsafe extern "C-unwind" {
     ) -> ecs_entity_t;
 }
 unsafe extern "C-unwind" {
-    #[doc = "Run a command.\n Parses the command line, runs the command and returns its result and the\n errors that were logged while it ran. The command and a JSON snapshot of its\n result are added to the history of the session. The result must be freed with ecs_shell_result_fini().\n\n @param world The world.\n @param session The session.\n @param cmd The command line.\n @return The result of the command."]
+    #[doc = "Run a command line.\n Parses the command line, runs its commands and returns their results and the\n errors that were logged while they ran. Commands are separated by `;`. When a\n command fails the remaining commands do not run. Each command that ran and a\n JSON snapshot of its result are added to the history of the session. The\n result must be freed with ecs_shell_result_fini().\n\n @param world The world.\n @param session The session.\n @param cmd The command line.\n @return The results of the commands."]
     pub fn ecs_shell_run(
         world: *mut ecs_world_t,
         session: ecs_entity_t,

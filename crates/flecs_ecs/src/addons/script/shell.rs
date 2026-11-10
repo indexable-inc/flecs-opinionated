@@ -48,9 +48,19 @@ impl World {
             sys::ecs_shell_run(world, *session.into_entity(self), cmd.as_ptr() as *const _)
         };
 
-        let value = if res.result.type_ != 0 && !res.result.ptr.is_null() {
+        // Flecs 4.2: one value per command of the line (vec<ecs_value_t>); the line's value is its
+        // last command's.
+        // SAFETY: `results` is a vec<ecs_value_t> owned by `res`.
+        let n = unsafe { sys::ecs_vec_count(&res.results) };
+        let last = if n > 0 {
+            // SAFETY: n - 1 < count.
+            Some(unsafe { *(sys::ecs_vec_first(&res.results) as *const sys::ecs_value_t).add(n as usize - 1) })
+        } else {
+            None
+        };
+        let value = if let Some(last) = last.filter(|v| v.type_ != 0 && !v.ptr.is_null()) {
             // SAFETY: the result value is a live value of type `type_` owned by `res`.
-            let expr = unsafe { sys::ecs_ptr_to_expr(world, res.result.type_, res.result.ptr) };
+            let expr = unsafe { sys::ecs_ptr_to_expr(world, last.type_, last.ptr) };
             if expr.is_null() {
                 None
             } else {

@@ -57,6 +57,8 @@ pub struct Rest {
     #[doc = "< Interface address (optional, default = 0.0.0.0)"]
     pub ipaddr: *mut ::core::ffi::c_char,
     pub impl_: *mut ::core::ffi::c_void,
+    #[doc = "< Whether the server refuses writes"]
+    pub readonly: bool,
 }
 
 impl Default for Rest {
@@ -65,6 +67,7 @@ impl Default for Rest {
             port: Default::default(),
             ipaddr: core::ptr::null_mut::<core::ffi::c_char>(),
             impl_: core::ptr::null_mut::<core::ffi::c_void>(),
+            readonly: false,
         }
     }
 }

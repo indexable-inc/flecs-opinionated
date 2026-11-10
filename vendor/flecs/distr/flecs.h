@@ -28,8 +28,8 @@
 
 /* Flecs version macros */
 #define FLECS_VERSION_MAJOR 4  /**< Flecs major version. */
-#define FLECS_VERSION_MINOR 1  /**< Flecs minor version. */
-#define FLECS_VERSION_PATCH 6  /**< Flecs patch version. */
+#define FLECS_VERSION_MINOR 2  /**< Flecs minor version. */
+#define FLECS_VERSION_PATCH 0  /**< Flecs patch version. */
 
 /** Flecs version. */
 #define FLECS_VERSION FLECS_VERSION_IMPL(\
@@ -1207,7 +1207,7 @@ typedef struct ecs_allocator_t ecs_allocator_t;
 #endif
 
 #ifndef FLECS_NO_ALWAYS_INLINE
-    #if defined(ECS_TARGET_CLANG) || defined(ECS_TARGET_GCC)
+    #if defined(ECS_TARGET_CLANG)
         #define FLECS_ALWAYS_INLINE __attribute__((always_inline))
     #elif defined(ECS_TARGET_MSVC)
         #define FLECS_ALWAYS_INLINE
@@ -1218,7 +1218,7 @@ typedef struct ecs_allocator_t ecs_allocator_t;
     #define FLECS_ALWAYS_INLINE
 #endif
 
-#if defined(ECS_TARGET_CLANG) || defined(ECS_TARGET_GCC)
+#if defined(ECS_TARGET_CLANG) || defined(ECS_TARGET_GNU)
     #define FLECS_NOINLINE __attribute__((noinline))
 #elif defined(ECS_TARGET_MSVC)
     #define FLECS_NOINLINE __declspec(noinline)
@@ -4103,10 +4103,10 @@ void ecs_os_set_api_defaults(void);
 #endif
 
 #ifdef ECS_TARGET_MINGW
-/* mingw bug: without this, a conversion error is thrown, but isnan/isinf should
- * accept float, double, and long double. */
-#define ecs_os_isnan(val) (isnan((float)val))
-#define ecs_os_isinf(val) (isinf((float)val))
+/* mingw bug: isnan/isinf throw a conversion error for double arguments. Use the
+ * type-generic builtins, as casting to float turns large doubles into inf. */
+#define ecs_os_isnan(val) (__builtin_isnan(val))
+#define ecs_os_isinf(val) (__builtin_isinf(val))
 #else
 #define ecs_os_isnan(val) (isnan(val))
 #define ecs_os_isinf(val) (isinf(val))
@@ -11164,9 +11164,12 @@ int32_t ecs_search_relation_for_entity(
     ecs_id_t *id_out,
     struct ecs_table_record_t **tr_out);
 
-/** Remove all entities in a table. Does not deallocate table memory. 
- * Retaining table memory can be efficient when planning 
- * to refill the table with operations like ecs_bulk_init().
+/** Delete all entities in a table. The entities are deleted as with
+ * ecs_delete(), which cleans up relationships and children that refer to them.
+ * Does not deallocate table memory, unless the cleanup deletes the table (for
+ * example when the table has a pair with one of its own entities as target).
+ * Retaining table memory can be efficient when planning to refill the table
+ * with operations like ecs_bulk_init().
  *
  * @param world The world.
  * @param table The table to clear.
@@ -17109,6 +17112,11 @@ void FlecsScriptInputImport(
  * Commands with optional parameters can be called with fewer arguments. Use
  * the help command to list the commands and their parameters.
  *
+ * A command line can contain multiple commands separated by `;`. Commands run
+ * in order, and each command sees the session state left by the previous one.
+ * When a command fails the remaining commands do not run. A `;` in a quoted
+ * string, between backticks or in a group is not a separator.
+ *
  * Commands can store files, like images, as resources of the session with
  * ecs_shell_resource_create(). A command signals that it returned a resource
  * by returning the flecs.script.shell.resource type (ecs_shell_resource_t).
@@ -17136,15 +17144,17 @@ extern "C" {
 #define FLECS_SCRIPT_SHELL_HISTORY_SIZE (256)
 #endif
 
-/** Result of running a command. */
+/** Result of running a command line. */
 typedef struct ecs_shell_result_t {
-    /** Value returned by the command. Empty when the command has no return
-     * value or failed. Commands that edit script code are the exception: when
-     * the edit was applied but reloading the script failed, the result is set
-     * together with the errors of the reload. */
-    ecs_value_t result;
+    /** Values returned by the commands that ran, one entry per command in the
+     * order of the command line (vec<ecs_value_t>). The last entry belongs to
+     * the command that failed, if any. An entry is empty when the command has
+     * no return value or failed. Commands that edit script code are the
+     * exception: when the edit was applied but reloading the script failed,
+     * the entry is set together with the errors of the reload. */
+    ecs_vec_t results;
 
-    /** Errors logged while the command ran, one entry per error (vec<char*>). */
+    /** Errors logged while the commands ran, one entry per error (vec<char*>). */
     ecs_vec_t errors;
 } ecs_shell_result_t;
 
@@ -17319,15 +17329,17 @@ ecs_entity_t ecs_shell_session_init(
     ecs_world_t *world,
     const ecs_shell_session_desc_t *desc);
 
-/** Run a command.
- * Parses the command line, runs the command and returns its result and the
- * errors that were logged while it ran. The command and a JSON snapshot of its
- * result are added to the history of the session. The result must be freed with ecs_shell_result_fini().
+/** Run a command line.
+ * Parses the command line, runs its commands and returns their results and the
+ * errors that were logged while they ran. Commands are separated by `;`. When a
+ * command fails the remaining commands do not run. Each command that ran and a
+ * JSON snapshot of its result are added to the history of the session. The
+ * result must be freed with ecs_shell_result_fini().
  *
  * @param world The world.
  * @param session The session.
  * @param cmd The command line.
- * @return The result of the command.
+ * @return The results of the commands.
  */
 FLECS_API
 ecs_shell_result_t ecs_shell_run(
@@ -30007,18 +30019,18 @@ struct entity_view : public id {
      * @param stage The current stage.
      * @return An entity handle that allows for mutations in the current stage.
      */
-    flecs::entity mut(const flecs::world& stage) const;
+    flecs::entity stage(const flecs::world& stage) const;
 
-    /** Same as mut(world), but for an iterator.
+    /** Same as stage(world), but for an iterator.
      * This operation allows for the construction of a mutable entity handle
      * from an iterator.
      *
      * @param it An iterator that contains a reference to the world or stage.
      * @return An entity handle that allows for mutations in the current stage.
      */
-    flecs::entity mut(const flecs::iter& it) const;
+    flecs::entity stage(const flecs::iter& it) const;
 
-    /** Same as mut(world), but for an entity.
+    /** Same as stage(world), but for an entity.
      * This operation allows for the construction of a mutable entity handle
      * from another entity. This is useful in each() functions, which only 
      * provide a handle to the entity being iterated over.
@@ -30026,7 +30038,16 @@ struct entity_view : public id {
      * @param e Another mutable entity.
      * @return An entity handle that allows for mutations in the current stage.
      */
-    flecs::entity mut(const flecs::entity_view& e) const;
+    flecs::entity stage(const flecs::entity_view& e) const;
+
+    /** Same as stage(world), but for the default stage.
+     * If the entity handle already uses a stage, the returned handle uses the
+     * same stage. Otherwise the returned handle uses the default stage
+     * (stage 0) of the world.
+     *
+     * @return An entity handle that allows for mutations in the stage.
+     */
+    flecs::entity stage() const;
 
 #   ifdef FLECS_JSON
 
@@ -33954,22 +33975,29 @@ inline flecs::entity entity_view::parent() const {
     return flecs::entity(world_, ecs_get_parent(world_, id_));
 }
 
-inline flecs::entity entity_view::mut(const flecs::world& stage) const {
+inline flecs::entity entity_view::stage(const flecs::world& stage) const {
     ecs_assert(!stage.is_readonly(), ECS_INVALID_PARAMETER, 
         "cannot use read-only world/stage to create mutable handle");
     return flecs::entity(id_).set_stage(stage.c_ptr());
 }
 
-inline flecs::entity entity_view::mut(const flecs::iter& it) const {
+inline flecs::entity entity_view::stage(const flecs::iter& it) const {
     ecs_assert(!it.stage().is_readonly(), ECS_INVALID_PARAMETER,
         "cannot use iterator created for read-only world/stage to create mutable handle");
     return flecs::entity(id_).set_stage(it.stage().c_ptr());
 }
 
-inline flecs::entity entity_view::mut(const flecs::entity_view& e) const {
+inline flecs::entity entity_view::stage(const flecs::entity_view& e) const {
     ecs_assert(!e.world().is_readonly(), ECS_INVALID_PARAMETER, 
         "cannot use entity created for read-only world/stage to create mutable handle");
     return flecs::entity(id_).set_stage(e.world_);
+}
+
+inline flecs::entity entity_view::stage() const {
+    if (ecs_is_stage(world_)) {
+        return flecs::entity(id_).set_stage(world_);
+    }
+    return flecs::entity(id_).set_stage(ecs_get_stage(world_, 0));
 }
 
 inline flecs::entity entity_view::set_stage(world_t *stage) {
